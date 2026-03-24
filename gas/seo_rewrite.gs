@@ -7,7 +7,8 @@ const REWRITE_CONFIG = {
   MAX_POSITION: 20,
   MIN_CLICKS: 10,
   TOP_N_REWRITE: 10,
-  COMPETITORS_PER_KW: 5,
+  COMPETITORS_PER_KW: 5,       // Yahoo検索から取得する件数
+  MAX_COMPETITORS_SCRAPE: 2,   // 実際にスクレイプする件数
 
   MAX_QUERIES_PER_RUN: 10,
   MIN_WAIT_MS: 15000,
@@ -22,7 +23,9 @@ const REWRITE_CONFIG = {
   ],
 
   REWRITE_MODEL: 'claude-sonnet-4-20250514',
-  REWRITE_MAX_TOKENS: 8192,
+  REWRITE_MAX_TOKENS: 4096,       // 8192→4096に削減
+  MAX_CONTENT_SUMMARY: 1500,      // スクレイプ本文概要の上限文字数
+  MAX_ARTICLES_PER_RUN: 1,        // Phase2で1回に処理する記事数
 
   REWRITE_SHEET_PREFIX: 'rewrite_',
   REWRITE_PLAN_SHEET: 'rewrite_plan',
@@ -37,7 +40,6 @@ function runRewritePhase1() {
   let cacheSheet = ss.getSheetByName(REWRITE_CONFIG.COMPETITOR_CACHE_SHEET);
 
   if (!cacheSheet) {
-    // gsc_masterからリライト候補を取得
     Logger.log('=== リライト候補選定（gsc_masterから） ===');
     const candidates = getRewriteCandidates(REWRITE_CONFIG.TOP_N_REWRITE);
 
@@ -51,7 +53,6 @@ function runRewritePhase1() {
     Logger.log('キャッシュシート作成完了。');
   }
 
-  // 競合URL未取得の行を処理
   const lastRow = cacheSheet.getLastRow();
   if (lastRow < 2) return;
 
@@ -93,9 +94,10 @@ function runRewritePhase1() {
     }
   }
 
-  // 残件チェック
   const updatedData = cacheSheet.getRange(2, 1, lastRow - 1, 7).getValues();
-  const remaining = updatedData.filter(row => row[6] !== '取得済み' && row[6] !== '分析済み' && row[6] !== '取得失敗').length;
+  const remaining = updatedData.filter(row =>
+    row[6] !== '取得済み' && row[6] !== '分析済み' && row[6] !== '取得失敗'
+  ).length;
 
   if (remaining === 0) {
     Logger.log('=== 全競合URL取得完了。runRewritePhase2 を実行してください。 ===');
@@ -105,7 +107,7 @@ function runRewritePhase1() {
 }
 
 // ============================================================
-// Phase 2: 競合分析 + リライト案生成
+// Phase 2: 競合分析 + リライト案生成（1記事ずつ処理）
 // ============================================================
 function runRewritePhase2() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -120,14 +122,34 @@ function runRewritePhase2() {
   const lastRow = cacheSheet.getLastRow();
   if (lastRow < 2) return;
 
+  // シートから最新データを読み込み
   const data = cacheSheet.getRange(2, 1, lastRow - 1, 7).getValues();
   const START_TIME = new Date().getTime();
-  const TIME_LIMIT_MS = 5 * 60 * 1000;
+
+  // 「分析中」のまま残った記事を「取得済み」にリセット
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][6] === '分析中') {
+      Logger.log(`リセット: [${i}] ${data[i][0]} (分析中→取得済み)`);
+      cacheSheet.getRange(i + 2, 7).setValue('取得済み');
+      data[i][6] = '取得済み';
+    }
+  }
+
+  // gsc_masterを1回だけ読み込み（ループ外）
+  const gscPages = readGscMaster();
+  Logger.log(`gsc_master読み込み: ${gscPages.length}件 (${Math.round((new Date().getTime() - START_TIME) / 1000)}秒)`);
+
   const results = [];
+  let processedThisRun = 0;
+
+  // 残件数を表示
+  const pendingCount = data.filter(row => row[6] === '取得済み').length;
+  Logger.log(`処理対象: ${pendingCount}件（1回最大${REWRITE_CONFIG.MAX_ARTICLES_PER_RUN}件）`);
 
   for (let i = 0; i < data.length; i++) {
-    if (new Date().getTime() - START_TIME > TIME_LIMIT_MS) {
-      Logger.log(`時間制限到達。${results.length}件完了。残りは次回実行。`);
+    // 1記事制限チェック
+    if (processedThisRun >= REWRITE_CONFIG.MAX_ARTICLES_PER_RUN) {
+      Logger.log(`記事数上限到達（${processedThisRun}件）。残りは次回実行。`);
       break;
     }
 
@@ -142,47 +164,74 @@ function runRewritePhase2() {
     const competitorJson = data[i][5];
     const rowNum = i + 2;
 
-    Logger.log(`--- リライト分析 [${results.length + 1}]: ${pageUrl} ---`);
+    const elapsed = () => Math.round((new Date().getTime() - START_TIME) / 1000);
+
+    Logger.log(`\n========================================`);
+    Logger.log(`[${elapsed()}秒] 分析開始: ${pageUrl}`);
+    Logger.log(`  KW: ${keyword}, 順位: ${position}`);
+    Logger.log(`========================================`);
+
+    // 処理中ステータスをセット
+    cacheSheet.getRange(rowNum, 7).setValue('分析中');
 
     try {
+      // Step A: 競合JSONパース
+      const stepA = new Date().getTime();
       const competitors = JSON.parse(competitorJson);
+      Logger.log(`[A] JSONパース: ${competitors.length}件 (${new Date().getTime() - stepA}ms)`);
 
-      // 自サイト記事スクレイプ
+      // Step B: 自サイトスクレイプ
+      const stepB = new Date().getTime();
       const ownStructure = scrapeArticleStructure(pageUrl);
+      Logger.log(`[B] 自サイトスクレイプ: ${new Date().getTime() - stepB}ms, 見出し: ${ownStructure ? ownStructure.headingCount : 'null'}, 本文: ${ownStructure ? ownStructure.contentSummary.length : 0}文字`);
+
       if (!ownStructure) {
-        Logger.log('自サイトスクレイプ失敗');
+        Logger.log('  → 自サイトスクレイプ失敗。スキップ。');
         cacheSheet.getRange(rowNum, 7).setValue('スクレイプ失敗');
         continue;
       }
 
-      // 競合記事スクレイプ（上位3記事）
+      // Step C: 競合スクレイプ（MAX_COMPETITORS_SCRAPE件）
       const competitorStructures = [];
-      for (let j = 0; j < Math.min(competitors.length, 3); j++) {
-        const comp = scrapeArticleStructure(competitors[j].url);
+      const scrapeLimit = Math.min(competitors.length, REWRITE_CONFIG.MAX_COMPETITORS_SCRAPE);
+
+      for (let j = 0; j < scrapeLimit; j++) {
+        const stepC = new Date().getTime();
+        const compUrl = competitors[j].url;
+        Logger.log(`[C${j}] 競合スクレイプ開始: ${compUrl.substring(0, 80)}...`);
+
+        const comp = scrapeArticleStructure(compUrl);
+        Logger.log(`[C${j}] 完了: ${new Date().getTime() - stepC}ms, 結果: ${comp ? `OK(見出し${comp.headingCount})` : 'NG'}`);
+
         if (comp) {
           competitorStructures.push({
-            url: competitors[j].url,
+            url: compUrl,
             title: competitors[j].title || comp.title,
             rank: j + 1,
             structure: comp,
           });
         }
-        Utilities.sleep(1000);
+        Utilities.sleep(500);
       }
 
-      Logger.log(`競合スクレイプ: ${competitorStructures.length}件成功`);
+      Logger.log(`[C] 競合スクレイプ完了: ${competitorStructures.length}/${scrapeLimit}件成功`);
 
       if (competitorStructures.length === 0) {
+        Logger.log('  → 競合スクレイプ全件失敗。スキップ。');
         cacheSheet.getRange(rowNum, 7).setValue('競合スクレイプ失敗');
         continue;
       }
 
-      // gsc_masterからKW一覧を取得
-      const gscPages = readGscMaster();
-      const pageData = gscPages.find(p => p.page === pageUrl);
-      const allKeywords = pageData ? pageData.keywords : [];
+      // Step D: gsc_masterからKW取得
+      const stepD = new Date().getTime();
+      const pageGscData = gscPages.find(p => p.page === pageUrl);
+      const allKeywords = pageGscData ? pageGscData.keywords : [];
+      Logger.log(`[D] KW取得: ${allKeywords.length}件 (${new Date().getTime() - stepD}ms)`);
 
-      // Claude APIでリライト案生成
+      // Step E: Claude API
+      const stepE = new Date().getTime();
+      Logger.log(`[E] Claude API呼び出し開始... (${elapsed()}秒経過)`);
+
       const rewritePlan = callClaudeRewrite({
         articleUrl: pageUrl,
         topKeyword: keyword,
@@ -193,6 +242,9 @@ function runRewritePhase2() {
         ownStructure: ownStructure,
         competitors: competitorStructures,
       });
+
+      const claudeTime = new Date().getTime() - stepE;
+      Logger.log(`[E] Claude API完了: ${claudeTime}ms (${Math.round(claudeTime / 1000)}秒), 結果: ${rewritePlan ? 'OK' : 'NG'}`);
 
       if (rewritePlan) {
         results.push({
@@ -206,26 +258,37 @@ function runRewritePhase2() {
           rewritePlan: rewritePlan,
         });
         cacheSheet.getRange(rowNum, 7).setValue('分析済み');
-        Logger.log('リライト案生成成功');
+        processedThisRun++;
+        Logger.log(`★ 分析成功 (トータル${elapsed()}秒)`);
       } else {
         cacheSheet.getRange(rowNum, 7).setValue('分析失敗');
-        Logger.log('リライト案生成失敗');
+        processedThisRun++;
+        Logger.log(`✗ 分析失敗 (トータル${elapsed()}秒)`);
       }
 
-      Utilities.sleep(2000);
-
     } catch (e) {
-      Logger.log(`エラー: ${e.message}`);
-      cacheSheet.getRange(rowNum, 7).setValue('エラー');
+      Logger.log(`✗ エラー: ${e.message}`);
+      Logger.log(`  スタック: ${e.stack ? e.stack.substring(0, 200) : 'なし'}`);
+      cacheSheet.getRange(rowNum, 7).setValue('エラー: ' + e.message.substring(0, 50));
+      processedThisRun++;
     }
   }
 
+  // 結果をシートに出力
   if (results.length > 0) {
     writeRewriteResultSheet(ss, results, dateRange);
     writeRewritePlanSheet(ss, results);
+    Logger.log(`\nシート出力完了: ${results.length}件`);
   }
 
-  Logger.log(`=== リライト分析完了: ${results.length}件 ===`);
+  // 残件確認
+  const remainingData = cacheSheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  const remainingCount = remainingData.filter(row => row[6] === '取得済み').length;
+  Logger.log(`\n=== Phase2完了: ${results.length}件分析、残り${remainingCount}件 ===`);
+
+  if (remainingCount > 0) {
+    Logger.log('再度 runRewritePhase2 を実行してください。');
+  }
 }
 
 // ============================================================
@@ -441,22 +504,27 @@ function scrapeArticleStructure(url) {
       if (text.length > 0) headings.push({ level: parseInt(match[1]), text });
     }
 
+    // 本文概要（MAX_CONTENT_SUMMARY文字まで）
     const paragraphs = [];
     const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
     let totalLength = 0;
-    while ((match = pRegex.exec(html)) !== null && totalLength < 3000) {
+    const maxLen = REWRITE_CONFIG.MAX_CONTENT_SUMMARY || 1500;
+    while ((match = pRegex.exec(html)) !== null && totalLength < maxLen) {
       const text = match[1].replace(/<[^>]+>/g, '').trim();
-      if (text.length > 20) { paragraphs.push(text); totalLength += text.length; }
+      if (text.length > 20) {
+        paragraphs.push(text);
+        totalLength += text.length;
+      }
     }
 
     return {
       title, h1, headings,
       headingCount: headings.length,
-      contentSummary: paragraphs.slice(0, 15).join('\n'),
+      contentSummary: paragraphs.slice(0, 10).join('\n'),
       totalParagraphs: paragraphs.length,
     };
   } catch (e) {
-    Logger.log(`スクレイプエラー [${url}]: ${e.message}`);
+    Logger.log(`スクレイプエラー [${url.substring(0, 80)}]: ${e.message}`);
     return null;
   }
 }
@@ -467,11 +535,17 @@ function scrapeArticleStructure(url) {
 function callClaudeRewrite(params) {
   const apiKey = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
 
+  const systemPrompt = buildRewriteSystemPrompt();
+  const userPrompt = buildRewriteUserPrompt(params);
+
+  // プロンプトサイズを記録
+  Logger.log(`  プロンプトサイズ: system=${systemPrompt.length}文字, user=${userPrompt.length}文字`);
+
   const requestBody = {
     model: REWRITE_CONFIG.REWRITE_MODEL,
     max_tokens: REWRITE_CONFIG.REWRITE_MAX_TOKENS,
-    system: buildRewriteSystemPrompt(),
-    messages: [{ role: 'user', content: buildRewriteUserPrompt(params) }],
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
   };
 
   try {
@@ -483,16 +557,26 @@ function callClaudeRewrite(params) {
       muteHttpExceptions: true,
     });
 
-    if (response.getResponseCode() !== 200) {
-      Logger.log(`Claude APIエラー: ${response.getResponseCode()}`);
+    const code = response.getResponseCode();
+    if (code !== 200) {
+      const errorText = response.getContentText().substring(0, 300);
+      Logger.log(`  Claude APIエラー: ${code} - ${errorText}`);
       return null;
     }
 
     const data = JSON.parse(response.getContentText());
     const text = data.content[0].text;
-    return JSON.parse(text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim());
+
+    // 使用トークン数を記録
+    if (data.usage) {
+      Logger.log(`  トークン: input=${data.usage.input_tokens}, output=${data.usage.output_tokens}`);
+    }
+
+    const jsonStr = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    return JSON.parse(jsonStr);
+
   } catch (e) {
-    Logger.log(`Claude API例外: ${e.message}`);
+    Logger.log(`  Claude API例外: ${e.message}`);
     return null;
   }
 }
@@ -517,6 +601,7 @@ function buildRewriteSystemPrompt() {
 - 見出し追加には内容概要（100〜200文字）を含める
 - 本文書き換えには現在の文と改善後の文の両方を含める
 - locationには自サイト記事内の正確な見出しテキストを使用
+- 出力は簡潔にすること（冗長な説明は不要）
 
 ## 出力形式（JSON以外のテキストは出力しない）
 
@@ -524,18 +609,18 @@ function buildRewriteSystemPrompt() {
   "article_url": "記事URL",
   "main_keyword": "メインKW",
   "current_position": 順位,
-  "overall_assessment": "記事の現状評価（3文程度）",
+  "overall_assessment": "記事の現状評価（2文程度）",
   "target_position": "改善後の目標順位",
   "missing_topics": [
     {
-      "topic": "競合にあって自サイトにないトピック",
-      "found_in": ["競合1位", "競合2位"],
-      "suggested_heading": "追加すべき見出しテキスト",
+      "topic": "不足トピック名",
+      "found_in": ["競合1位"],
+      "suggested_heading": "追加見出しテキスト",
       "heading_level": 2,
-      "insert_after": "この見出しの後に追加（自サイトの既存見出しテキスト）",
-      "content_outline": "見出し下に書くべき内容概要（100〜200文字）",
+      "insert_after": "挿入位置の既存見出しテキスト",
+      "content_outline": "内容概要（100〜200文字）",
       "priority": "高 | 中 | 低",
-      "seo_rationale": "SEO改善理由"
+      "seo_rationale": "理由（1文）"
     }
   ],
   "unnecessary_topics": [
@@ -543,17 +628,17 @@ function buildRewriteSystemPrompt() {
   ],
   "content_improvements": [
     {
-      "location": "改善対象の見出しテキスト",
+      "location": "見出しテキスト",
       "issue": "問題点",
-      "current_text": "現在の本文（抜粋）",
-      "improved_text": "改善後の本文",
-      "seo_rationale": "改善理由"
+      "current_text": "現在の文（50文字以内の抜粋）",
+      "improved_text": "改善後の文",
+      "seo_rationale": "理由（1文）"
     }
   ],
   "structure_changes": [
     { "type": "順序変更 | 階層変更 | 見出し名変更", "current": "現在", "proposed": "提案", "seo_rationale": "理由" }
   ],
-  "priority_summary": "最も優先度の高い改善3つを箇条書きで"
+  "priority_summary": "最優先の改善3つを箇条書き"
 }`;
 }
 
@@ -569,33 +654,37 @@ function buildRewriteUserPrompt(params) {
     const headings = c.structure.headings
       .map(h => `${'  '.repeat(h.level - 2)}${h.level === 2 ? '##' : '###'} ${h.text}`)
       .join('\n');
-    return `【競合${c.rank}位】${c.title}\nURL: ${c.url}\n見出し数: ${c.structure.headingCount}\n${headings}\n\n本文概要:\n${c.structure.contentSummary.substring(0, 500)}`;
+    // 競合の本文概要は300文字に制限
+    const summary = c.structure.contentSummary ? c.structure.contentSummary.substring(0, 300) : '';
+    return `【競合${c.rank}位】${c.title}\nURL: ${c.url}\n見出し数: ${c.structure.headingCount}\n${headings}\n\n本文概要:\n${summary}`;
   }).join('\n\n---\n\n');
 
   const keywordsText = (params.allKeywords || []).slice(0, 10)
-    .map(k => `${k.keyword}（クリック${k.clicks}, 表示${k.impressions}, 順位${Math.round(k.position * 10) / 10}）`)
+    .map(k => `${k.keyword}（クリック${k.clicks}, 順位${Math.round(k.position * 10) / 10}）`)
     .join('\n');
+
+  // 自サイト本文概要を800文字に制限
+  const ownSummary = params.ownStructure.contentSummary
+    ? params.ownStructure.contentSummary.substring(0, 800)
+    : '';
 
   return `以下の記事をリライト分析してください。
 
 【自サイト記事】
 URL: ${params.articleUrl}
 タイトル: ${params.ownStructure.title}
-H1: ${params.ownStructure.h1}
 見出し数: ${params.ownStructure.headingCount}
-メイン流入KW: ${params.topKeyword}
-現在の順位: ${params.position}
-クリック数（28日）: ${params.clicks}
-表示回数（28日）: ${params.impressions}
+メインKW: ${params.topKeyword}
+順位: ${params.position} / クリック: ${params.clicks} / 表示: ${params.impressions}
 
-流入KW一覧:
-${keywordsText || '(データなし)'}
+流入KW:
+${keywordsText || '(なし)'}
 
-自サイト見出し構造:
+見出し構造:
 ${ownHeadings}
 
-自サイト本文概要:
-${params.ownStructure.contentSummary}
+本文概要:
+${ownSummary}
 
 ---
 
@@ -609,6 +698,7 @@ ${competitorTexts}`;
 function applyRewriteToContent(currentContent, rewriteData) {
   let content = currentContent;
   try {
+    // 本文書き換え
     if (rewriteData.content_improvements) {
       for (const imp of rewriteData.content_improvements) {
         if (imp.current_text && imp.improved_text && content.includes(imp.current_text)) {
@@ -618,6 +708,7 @@ function applyRewriteToContent(currentContent, rewriteData) {
       }
     }
 
+    // 見出し追加（優先度高→中の順）
     if (rewriteData.missing_topics) {
       const sorted = rewriteData.missing_topics
         .filter(t => t.priority === '高')
@@ -670,12 +761,17 @@ function createCompetitorCacheSheet(ss, candidates) {
 function writeRewriteResultSheet(ss, results, dateRange) {
   const sheetName = REWRITE_CONFIG.REWRITE_SHEET_PREFIX + dateRange.end;
   let sheet = ss.getSheetByName(sheetName);
-  if (sheet) ss.deleteSheet(sheet);
-  sheet = ss.insertSheet(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = ['記事URL', '投稿ID', 'メインKW', '現在順位', 'クリック数', '表示回数', '競合数', '総合評価', '目標順位', '不足トピック', '不要トピック', '本文改善', '構造変更', '優先改善'];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#2E7D32').setFontColor('#FFFFFF');
+    sheet.setColumnWidth(1, 400); sheet.setColumnWidth(8, 400);
+    sheet.setColumnWidth(10, 500); sheet.setColumnWidth(12, 500); sheet.setColumnWidth(14, 400);
+  }
 
-  const headers = ['記事URL', '投稿ID', 'メインKW', '現在順位', 'クリック数', '表示回数', '競合数', '総合評価', '目標順位', '不足トピック', '不要トピック', '本文改善', '構造変更', '優先改善'];
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#2E7D32').setFontColor('#FFFFFF');
+  // 既存データの末尾に追記（1記事ずつ処理のため）
+  const nextRow = sheet.getLastRow() + 1;
 
   const rows = results.map(r => {
     const p = r.rewritePlan;
@@ -686,21 +782,34 @@ function writeRewriteResultSheet(ss, results, dateRange) {
       p.priority_summary || ''];
   });
 
-  if (rows.length > 0) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
-  sheet.setColumnWidth(1, 400); sheet.setColumnWidth(8, 400);
-  sheet.setColumnWidth(10, 500); sheet.setColumnWidth(12, 500); sheet.setColumnWidth(14, 400);
-  Logger.log(`「${sheetName}」に ${rows.length} 件出力`);
+  if (rows.length > 0) {
+    sheet.getRange(nextRow, 1, rows.length, 14).setValues(rows);
+  }
+
+  Logger.log(`「${sheetName}」に ${rows.length} 件追記（行${nextRow}〜）`);
 }
 
 function writeRewritePlanSheet(ss, results) {
   const sheetName = REWRITE_CONFIG.REWRITE_PLAN_SHEET;
   let sheet = ss.getSheetByName(sheetName);
-  if (sheet) ss.deleteSheet(sheet);
-  sheet = ss.insertSheet(sheetName);
 
-  const headers = ['記事URL', '投稿ID', 'メインKW', '現在順位', 'リライト概要', '不足トピック数', '本文改善数', 'ステータス'];
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#2E7D32').setFontColor('#FFFFFF');
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = ['記事URL', '投稿ID', 'メインKW', '現在順位', 'リライト概要', '不足トピック数', '本文改善数', 'ステータス'];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#2E7D32').setFontColor('#FFFFFF');
+    sheet.setColumnWidth(1, 400); sheet.setColumnWidth(5, 500); sheet.setColumnWidth(8, 100);
+
+    const statusRange = sheet.getRange(2, 8, 100, 1);
+    sheet.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('承認待ち').setBackground('#E8F5E9').setRanges([statusRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('承認').setBackground('#C8E6C9').setFontColor('#1B5E20').setRanges([statusRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('反映済み').setBackground('#BBDEFB').setRanges([statusRange]).build(),
+    ]);
+  }
+
+  // 既存データの末尾に追記
+  const nextRow = sheet.getLastRow() + 1;
 
   const rows = results.map(r => {
     const p = r.rewritePlan;
@@ -708,16 +817,11 @@ function writeRewritePlanSheet(ss, results) {
       (p.missing_topics || []).length, (p.content_improvements || []).length, '承認待ち'];
   });
 
-  if (rows.length > 0) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
-  sheet.setColumnWidth(1, 400); sheet.setColumnWidth(5, 500); sheet.setColumnWidth(8, 100);
+  if (rows.length > 0) {
+    sheet.getRange(nextRow, 1, rows.length, 8).setValues(rows);
+  }
 
-  const statusRange = sheet.getRange(2, 8, Math.max(rows.length, 1), 1);
-  sheet.setConditionalFormatRules([
-    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('承認待ち').setBackground('#E8F5E9').setRanges([statusRange]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('承認').setBackground('#C8E6C9').setFontColor('#1B5E20').setRanges([statusRange]).build(),
-    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('反映済み').setBackground('#BBDEFB').setRanges([statusRange]).build(),
-  ]);
-  Logger.log(`「${sheetName}」に ${rows.length} 件出力`);
+  Logger.log(`「${sheetName}」に ${rows.length} 件追記（行${nextRow}〜）`);
 }
 
 function getLatestRewriteSheet(ss) {
@@ -824,7 +928,7 @@ function testRewriteCandidates() {
 function testSingleRewrite() {
   Logger.log('=== 単体リライトテスト ===');
   const candidates = getRewriteCandidates(1);
-  if (candidates.length === 0) { Logger.log('候補なし。refreshGscMasterを実行済みか確認。'); return; }
+  if (candidates.length === 0) { Logger.log('候補なし'); return; }
 
   const target = candidates[0];
   Logger.log(`対象: ${target.page} (KW: ${target.topKeyword}, 順位: ${target.position})`);
