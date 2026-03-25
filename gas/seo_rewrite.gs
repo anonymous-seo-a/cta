@@ -32,7 +32,7 @@ const REWRITE_CONFIG = {
   ],
 
   REWRITE_MODEL: 'claude-sonnet-4-20250514',
-  REWRITE_MAX_TOKENS: 4096,
+  REWRITE_MAX_TOKENS: 8192,
   MAX_CONTENT_SUMMARY: 1500,
   MAX_ARTICLES_PER_RUN: 1,
 
@@ -493,8 +493,21 @@ function callClaudeRewrite(params) {
     const data = JSON.parse(response.getContentText());
     if (data.usage) Logger.log(`  トークン: in=${data.usage.input_tokens}, out=${data.usage.output_tokens}`);
 
+    // トークン上限で出力が切れたか確認
+    const stopReason = data.stop_reason || (data.content && data.content[0] && data.content[0].stop_reason) || '';
+    if (stopReason === 'max_tokens' || (data.usage && data.usage.output_tokens >= REWRITE_CONFIG.REWRITE_MAX_TOKENS - 10)) {
+      Logger.log(`  ⚠ 出力がmax_tokensで切れた可能性あり。JSON修復を試行。`);
+    }
+
     const text = data.content[0].text;
-    return JSON.parse(text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim());
+    const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+
+    try {
+      return JSON.parse(cleaned);
+    } catch (parseErr) {
+      Logger.log(`  JSONパースエラー: ${parseErr.message}。修復を試行...`);
+      return repairTruncatedJson(cleaned);
+    }
   } catch (e) {
     Logger.log(`  Claude API例外: ${e.message}`);
     return null;
@@ -523,7 +536,8 @@ function buildRewriteSystemPrompt() {
 - 見出し追加には内容概要（150〜300文字）を含める
 - 本文書き換えには現在の文と改善後の文の両方を含める
 - locationには自サイト記事内の正確な見出しテキストを使用
-- H2セクションごとに変更指示をまとめること（section_plan）
+- H2セクションごとに変更指示をまとめること（section_plan）。H3以下はH2の指示内に含める
+- section_planは最大15件まで。優先度「低」のセクションはaction=維持として省略してよい
 - CTA関連ブロック（<!-- wp:soico-cta/ で始まるもの）と再利用ブロック（<!-- wp:block {"ref":数字} /-->）は絶対に変更しない
 
 ## 出力形式（JSON以外のテキストは出力しない）
@@ -757,6 +771,54 @@ function formatOutdatedInfo(items) {
 function formatStructureChanges(t) {
   if (!t||!t.length) return 'なし';
   return t.map(x=>`${x.type}: ${x.current} → ${x.proposed}\n  理由: ${x.seo_rationale}`).join('\n\n');
+}
+
+// ============================================================
+// 切れたJSONの修復
+// ============================================================
+function repairTruncatedJson(text) {
+  // 閉じ括弧を補完して有効なJSONにする
+  let repaired = text;
+
+  // 末尾の不完全な文字列を切り落とす（開いた"を閉じる）
+  const lastQuote = repaired.lastIndexOf('"');
+  const lastColon = repaired.lastIndexOf(':');
+  const lastComma = repaired.lastIndexOf(',');
+  const lastBrace = Math.max(repaired.lastIndexOf('}'), repaired.lastIndexOf(']'));
+
+  // 最後の完全なkey-valueペアまで戻る
+  if (lastBrace < lastComma) {
+    // カンマの後に不完全なデータがある→カンマまで切り落とす
+    repaired = repaired.substring(0, lastComma);
+  }
+
+  // 開き括弧と閉じ括弧を数えて補完
+  let openBraces = 0, openBrackets = 0;
+  let inString = false, escape = false;
+  for (const ch of repaired) {
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') openBraces++;
+    if (ch === '}') openBraces--;
+    if (ch === '[') openBrackets++;
+    if (ch === ']') openBrackets--;
+  }
+
+  // 閉じ括弧を補完
+  for (let i = 0; i < openBrackets; i++) repaired += ']';
+  for (let i = 0; i < openBraces; i++) repaired += '}';
+
+  try {
+    const result = JSON.parse(repaired);
+    Logger.log(`  JSON修復成功（${openBrackets}個の]、${openBraces}個の}を補完）`);
+    return result;
+  } catch (e) {
+    Logger.log(`  JSON修復失敗: ${e.message}`);
+    Logger.log(`  修復後の末尾200文字: ${repaired.substring(repaired.length - 200)}`);
+    return null;
+  }
 }
 
 // ============================================================
