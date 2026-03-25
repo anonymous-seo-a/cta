@@ -7,7 +7,7 @@
 // 再実行時は処理済みセクションをスキップして続きから再開。
 // 全セクション完了後にGoogle Driveにファイル保存。
 
-const STEP3_CONFIG = {
+const REWRITE_STEP3 = {
   MODEL: 'claude-sonnet-4-20250514',
   SECTION_MAX_TOKENS: 8192,
   FULLTEXT_SHEET: 'rewrite_fulltext',
@@ -24,7 +24,7 @@ function runRewriteStep3() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const START_TIME = new Date().getTime();
   const elapsed = () => Math.round((new Date().getTime() - START_TIME) / 1000);
-  const isTimeout = () => (new Date().getTime() - START_TIME) > STEP3_CONFIG.TIMEOUT_MS;
+  const isTimeout = () => (new Date().getTime() - START_TIME) > REWRITE_STEP3.TIMEOUT_MS;
 
   // 1. 進行中の処理があるか確認
   const progress = loadProgress(ss);
@@ -45,7 +45,7 @@ function runRewriteStep3() {
     designRowNum = progress.designRowNum;
 
     // 設計書を再取得
-    const designSheet = ss.getSheetByName(STEP3_CONFIG.DESIGN_SHEET);
+    const designSheet = ss.getSheetByName(REWRITE_STEP3.DESIGN_SHEET);
     const designData = designSheet.getRange(designRowNum, 1, 1, 15).getValues()[0];
     try { design = JSON.parse(designData[14]); } catch (e) { Logger.log('設計書JSONパースエラー'); return; }
     humanNotes = designData[12];
@@ -65,7 +65,7 @@ function runRewriteStep3() {
 
   } else {
     // === 新規モード ===
-    const designSheet = ss.getSheetByName(STEP3_CONFIG.DESIGN_SHEET);
+    const designSheet = ss.getSheetByName(REWRITE_STEP3.DESIGN_SHEET);
     if (!designSheet) { Logger.log('rewrite_designシートが見つかりません。'); return; }
 
     const lastRow = designSheet.getLastRow();
@@ -101,7 +101,7 @@ function runRewriteStep3() {
     const wpPost = fetchWpPost(targetPostId);
     if (!wpPost || !wpPost.content || !wpPost.content.raw) {
       Logger.log('WP取得失敗');
-      const ds = ss.getSheetByName(STEP3_CONFIG.DESIGN_SHEET);
+      const ds = ss.getSheetByName(REWRITE_STEP3.DESIGN_SHEET);
       ds.getRange(designRowNum, 14).setValue('WP取得失敗');
       return;
     }
@@ -238,7 +238,7 @@ function runRewriteStep3() {
 
   // 7. 進捗シートクリア & デザインシート更新
   clearProgress(ss, targetPostId);
-  const designSheet = ss.getSheetByName(STEP3_CONFIG.DESIGN_SHEET);
+  const designSheet = ss.getSheetByName(REWRITE_STEP3.DESIGN_SHEET);
   if (designSheet) designSheet.getRange(designRowNum, 14).setValue('リライト済み');
 
   Logger.log(`★ 完了 (トータル${elapsed()}秒)`);
@@ -248,9 +248,9 @@ function runRewriteStep3() {
 // 進捗管理（rewrite_progressシート）
 // ============================================================
 function getProgressSheet(ss) {
-  let sheet = ss.getSheetByName(STEP3_CONFIG.PROGRESS_SHEET);
+  let sheet = ss.getSheetByName(REWRITE_STEP3.PROGRESS_SHEET);
   if (!sheet) {
-    sheet = ss.insertSheet(STEP3_CONFIG.PROGRESS_SHEET);
+    sheet = ss.insertSheet(REWRITE_STEP3.PROGRESS_SHEET);
     const h = ['投稿ID', 'セクション番号', 'リライト済みコンテンツ', 'URL', 'KW', 'designRowNum', 'totalSections'];
     sheet.getRange(1, 1, 1, 7).setValues([h]);
     sheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#424242').setFontColor('#FFFFFF');
@@ -265,7 +265,7 @@ function initProgress(ss, postId, url, keyword, designRowNum, totalSections) {
 }
 
 function loadProgress(ss) {
-  const sheet = ss.getSheetByName(STEP3_CONFIG.PROGRESS_SHEET);
+  const sheet = ss.getSheetByName(REWRITE_STEP3.PROGRESS_SHEET);
   if (!sheet) return null;
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return null;
@@ -288,7 +288,7 @@ function loadProgress(ss) {
 }
 
 function loadProcessedSections(ss, postId) {
-  const sheet = ss.getSheetByName(STEP3_CONFIG.PROGRESS_SHEET);
+  const sheet = ss.getSheetByName(REWRITE_STEP3.PROGRESS_SHEET);
   if (!sheet) return {};
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return {};
@@ -308,7 +308,7 @@ function saveProcessedSection(ss, postId, sectionIndex, content) {
 }
 
 function clearProgress(ss, postId) {
-  const sheet = ss.getSheetByName(STEP3_CONFIG.PROGRESS_SHEET);
+  const sheet = ss.getSheetByName(REWRITE_STEP3.PROGRESS_SHEET);
   if (!sheet) return;
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return;
@@ -325,12 +325,12 @@ function clearProgress(ss, postId) {
 // ============================================================
 function saveToGoogleDrive(postId, keyword, fullText) {
   // 出力フォルダを取得or作成
-  let folders = DriveApp.getFoldersByName(STEP3_CONFIG.DRIVE_FOLDER_NAME);
+  let folders = DriveApp.getFoldersByName(REWRITE_STEP3.DRIVE_FOLDER_NAME);
   let folder;
   if (folders.hasNext()) {
     folder = folders.next();
   } else {
-    folder = DriveApp.createFolder(STEP3_CONFIG.DRIVE_FOLDER_NAME);
+    folder = DriveApp.createFolder(REWRITE_STEP3.DRIVE_FOLDER_NAME);
   }
 
   const dateStr = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm');
@@ -346,7 +346,7 @@ function saveToGoogleDrive(postId, keyword, fullText) {
 // 全文出力シート（Google Driveリンク版）
 // ============================================================
 function writeFulltextSheet(ss, pageUrl, postId, keyword, charCount, driveUrl) {
-  const sheetName = STEP3_CONFIG.FULLTEXT_SHEET;
+  const sheetName = REWRITE_STEP3.FULLTEXT_SHEET;
   let sheet = ss.getSheetByName(sheetName);
 
   if (!sheet) {
@@ -378,7 +378,7 @@ function writeFulltextSheet(ss, pageUrl, postId, keyword, charCount, driveUrl) {
 // ============================================================
 function applyApprovedFulltext() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(STEP3_CONFIG.FULLTEXT_SHEET);
+  const sheet = ss.getSheetByName(REWRITE_STEP3.FULLTEXT_SHEET);
   if (!sheet) { Logger.log('rewrite_fulltextシートが見つかりません。'); return; }
 
   const lastRow = sheet.getLastRow();
@@ -523,8 +523,8 @@ function callClaudeSectionRewrite(params) {
       contentType: 'application/json',
       headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       payload: JSON.stringify({
-        model: STEP3_CONFIG.MODEL,
-        max_tokens: STEP3_CONFIG.SECTION_MAX_TOKENS,
+        model: REWRITE_STEP3.MODEL,
+        max_tokens: REWRITE_STEP3.SECTION_MAX_TOKENS,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
       }),
