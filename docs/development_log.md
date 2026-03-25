@@ -2,26 +2,39 @@
 
 ## 2026-03-25: Session 3
 
-### 機能3: SEOリライト — Phase 2.5 実装
+### 機能3: SEOリライト — 全面再設計
 
-**完了した作業:**
-- seo_rewrite_markup.gs 新設（Phase 2.5: Gutenbergマークアップ生成）
-- `runRewritePhase25()`: rewrite_plan「承認待ち」→ WP rawコンテンツ取得 → Claude APIでGutenbergマークアップ生成 → rewrite_markup_*シート出力
-- `applyApprovedMarkup()`: Phase 3改。rewrite_markup_*シートの「承認」行をWPに反映
-- デザインパターンテンプレートをシステムプロンプトに組み込み（box-004/006/008、比較表、Q&A、ステップ、要約ボックス等）
-- MAX_TOKENS 8192（rawコンテンツ＋分析結果を処理するため増量）
+**問題点（旧設計）:**
+- Phase 2の分析が見出し構造の比較止まり（ペルソナ・検索意図の分析がない）
+- Phase 2.5の出力が断片パッチ（記事全文のマークアップが得られない）
+- フローが冗長で中間成果物の確認ステップが不明確
 
-**設計ポイント:**
-- 1記事/実行の制約を維持
-- WPコンテンツは40,000文字上限で切り詰め
-- CTAプラグインブロック・再利用ブロックは変更対象外
-- 変更ごとに1行出力 → 人間が個別に承認/スキップ可能
-- `replaceSectionContent()`: 見出し〜次の同レベル見出しまでのセクション置換
+**新設計（4ステップ）:**
+- Step 1: 競合調査（既存Phase 1、変更なし）
+- Step 2: リライト設計書の生成（Phase 2プロンプト大幅強化）
+  - ペルソナ推定（KWからClaude APIが推定）
+  - 検索意図分析
+  - H2セクション単位の変更指示
+  - 表現・言い回しの最適化指示
+  - 古い情報の特定
+  → rewrite_designシート出力、人間が確認・追加メモ→「承認」
+- Step 3: セクション別リライト → 全文結合（seo_rewrite_markup.gs全面書き直し）
+  - H2で記事を分割
+  - セクションごとにClaude API呼び出し（設計書の指示+ペルソナ+デザインパターン）
+  - CTA・再利用ブロックは一字一句保持
+  - 全セクション結合 → rewrite_fulltextシートに全文出力
+- Step 4: 全文確認 → WP入稿
+  - Spreadsheetで全文マークアップを確認→「承認」→ WP REST API
+
+**変更したファイル:**
+- seo_rewrite.gs: buildRewriteSystemPrompt強化、writeRewriteDesignSheet新設、旧applyApprovedRewrites/applyRewriteToContent削除
+- seo_rewrite_markup.gs: 全面書き直し（runRewriteStep3, applyApprovedFulltext, splitByH2等）
 
 **次のタスク:**
-- GASエディタにコピーしてテスト実行
-- プロンプト品質の確認（生成されるマークアップがWPで正常表示されるか）
-- 必要に応じてデザインパターンテンプレートの微調整
+- GASエディタにコピーしてStep 2（runRewritePhase2）のテスト実行
+- rewrite_designシートの出力品質確認
+- Step 3（runRewriteStep3）のテスト実行
+- 全文マークアップのWP表示確認
 
 ---
 

@@ -275,8 +275,7 @@ function runRewritePhase2() {
   }
 
   if (results.length > 0) {
-    writeRewriteResultSheet(ss, results, dateRange);
-    writeRewritePlanSheet(ss, results);
+    writeRewriteDesignSheet(ss, results);
   }
 
   const remainingData = cacheSheet.getRange(2, 1, lastRow - 1, 7).getValues();
@@ -285,53 +284,7 @@ function runRewritePhase2() {
 }
 
 // ============================================================
-// Phase 3: 承認済みリライトをWordPressに反映
-// ============================================================
-function applyApprovedRewrites() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(REWRITE_CONFIG.REWRITE_PLAN_SHEET);
-  if (!sheet) { Logger.log('rewrite_planシートが見つかりません。'); return; }
-
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
-
-  const data = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
-  let applied = 0;
-
-  for (let i = 0; i < data.length; i++) {
-    const url = data[i][0];
-    const postId = data[i][1];
-    const status = data[i][7];
-    if (status !== '承認') continue;
-
-    Logger.log(`--- リライト反映: ${url} (ID: ${postId}) ---`);
-
-    const postData = fetchWpPost(postId);
-    if (!postData) { sheet.getRange(i + 2, 8).setValue('取得失敗'); continue; }
-
-    const currentContent = postData.content.raw;
-    const rewriteSheet = getLatestRewriteSheet(ss);
-    const fullData = rewriteSheet ? getRewriteDataForUrl(rewriteSheet, url) : null;
-    if (!fullData) { sheet.getRange(i + 2, 8).setValue('データ不足'); continue; }
-
-    const rewrittenContent = applyRewriteToContent(currentContent, fullData);
-    if (!rewrittenContent || rewrittenContent === currentContent) {
-      sheet.getRange(i + 2, 8).setValue('適用失敗'); continue;
-    }
-
-    if (updateWpPost(postId, rewrittenContent)) {
-      Logger.log('更新成功');
-      sheet.getRange(i + 2, 8).setValue('反映済み');
-      applied++;
-    } else {
-      sheet.getRange(i + 2, 8).setValue('更新失敗');
-    }
-    Utilities.sleep(1000);
-  }
-
-  Logger.log(`=== リライト反映完了: ${applied}件 ===`);
-}
-
+// Phase 3 は seo_rewrite_markup.gs に移動
 // ============================================================
 // Yahoo検索スクレイプ
 // ============================================================
@@ -553,22 +506,25 @@ function callClaudeRewrite(params) {
 // ============================================================
 function buildRewriteSystemPrompt() {
   return `あなたは金融アフィリエイトメディアのSEOリライト専門家です。
-自サイト記事と競合上位記事の構成を比較し、SEO順位を改善するための具体的なリライト案を生成してください。
+自サイト記事と競合上位記事の構成を比較し、検索1位を獲得するための「リライト設計書」を生成してください。
 
-## 分析の観点
-1. 見出し構成の過不足（競合にあって自サイトにないトピック、逆も）
-2. コンテンツの深さ（説明が浅い・不十分なセクション）
-3. 検索意図との整合性
-4. E-E-A-T要素
+## 分析の観点（全て実施すること）
+1. ペルソナ推定: ターゲットKWから検索するユーザー像を具体的に推定する（年齢層・状況・知識レベル・不安や疑問・求めている情報）
+2. 検索意図の分析: ユーザーが本当に知りたいことは何か。現在の記事は検索意図に対してズレていないか
+3. 見出し構成の過不足: 競合にあって自サイトにないトピック、逆に不要なトピック
+4. コンテンツの深さ: 説明が浅い・不十分・古い情報があるセクション
+5. 表現・言い回しの最適化: ペルソナに対して表現が適切か。もっとわかりやすい・刺さる言い回しがないか
+6. E-E-A-T要素: 専門性・経験・権威性・信頼性の不足箇所
 
 ## 出力ルール
 - 景品表示法・金融商品取引法に抵触する表現は提案しない
 - 既存の良い部分は維持する
 - 各変更にはSEO改善の根拠を付ける
-- 見出し追加には内容概要（100〜200文字）を含める
+- 見出し追加には内容概要（150〜300文字）を含める
 - 本文書き換えには現在の文と改善後の文の両方を含める
 - locationには自サイト記事内の正確な見出しテキストを使用
-- 簡潔に出力すること
+- H2セクションごとに変更指示をまとめること（section_plan）
+- CTA関連ブロック（<!-- wp:soico-cta/ で始まるもの）と再利用ブロック（<!-- wp:block {"ref":数字} /-->）は絶対に変更しない
 
 ## 出力形式（JSON以外のテキストは出力しない）
 
@@ -576,36 +532,60 @@ function buildRewriteSystemPrompt() {
   "article_url": "記事URL",
   "main_keyword": "メインKW",
   "current_position": 順位,
-  "overall_assessment": "現状評価（2文）",
   "target_position": "目標順位",
-  "missing_topics": [
+  "persona": {
+    "age_range": "年齢層",
+    "situation": "検索している状況（2文）",
+    "knowledge_level": "初心者 | 中級者 | 上級者",
+    "concerns": ["不安や疑問1", "不安や疑問2"],
+    "desired_info": "求めている情報（1文）"
+  },
+  "search_intent_analysis": {
+    "primary_intent": "主たる検索意図（1文）",
+    "current_alignment": "現在の記事と検索意図のズレの有無と内容（2文）",
+    "improvement_direction": "改善の方向性（2文）"
+  },
+  "overall_assessment": "現状評価（3文。強み・弱み・改善方向）",
+  "section_plan": [
     {
-      "topic": "不足トピック名",
-      "found_in": ["競合1位"],
-      "suggested_heading": "追加見出し",
+      "h2_heading": "既存のH2見出しテキスト（正確に）",
+      "action": "書き換え | 追加 | 削除 | 統合 | 維持",
+      "instructions": "このセクションに対する具体的な変更指示（3〜5文。何を書き換えるか、何を追加するか、どんな表現に改善するか）",
+      "new_heading": "見出しテキストを変更する場合の新しい見出し（変更しない場合は空文字）",
+      "priority": "高 | 中 | 低"
+    }
+  ],
+  "new_sections": [
+    {
+      "suggested_heading": "新規追加する見出し",
       "heading_level": 2,
-      "insert_after": "挿入位置の既存見出し",
-      "content_outline": "内容概要（100〜200文字）",
+      "insert_after": "挿入位置の既存H2見出し",
+      "content_outline": "内容概要（150〜300文字。ペルソナの不安や疑問に答える内容を意識すること）",
       "priority": "高 | 中 | 低",
       "seo_rationale": "理由（1文）"
     }
   ],
-  "unnecessary_topics": [
-    { "heading": "不要な見出し", "reason": "理由", "action": "削除 | 統合 | 簡略化" }
-  ],
-  "content_improvements": [
+  "expression_improvements": [
     {
       "location": "見出しテキスト",
-      "issue": "問題点",
-      "current_text": "現在の文（50文字以内）",
-      "improved_text": "改善後の文",
-      "seo_rationale": "理由（1文）"
+      "issue": "ペルソナに対してどう問題か",
+      "current_text": "現在の表現",
+      "improved_text": "改善後の表現",
+      "rationale": "なぜこの表現がペルソナに刺さるか（1文）"
+    }
+  ],
+  "outdated_info": [
+    {
+      "location": "見出しテキスト",
+      "current_info": "古い情報の内容",
+      "update_needed": "更新すべき内容の方向性",
+      "priority": "高 | 中 | 低"
     }
   ],
   "structure_changes": [
     { "type": "順序変更 | 階層変更 | 見出し名変更", "current": "現在", "proposed": "提案", "seo_rationale": "理由" }
   ],
-  "priority_summary": "最優先の改善3つ"
+  "priority_summary": "最優先の改善3つ（ペルソナ視点で最もインパクトが大きい順）"
 }`;
 }
 
@@ -652,43 +632,7 @@ ${ownSummary}
 ${competitorTexts}`;
 }
 
-// ============================================================
-// リライトをコンテンツに適用
-// ============================================================
-function applyRewriteToContent(currentContent, rewriteData) {
-  let content = currentContent;
-  try {
-    if (rewriteData.content_improvements) {
-      for (const imp of rewriteData.content_improvements) {
-        if (imp.current_text && imp.improved_text && content.includes(imp.current_text)) {
-          content = content.replace(imp.current_text, imp.improved_text);
-          Logger.log(`本文置換: ${imp.location}`);
-        }
-      }
-    }
-
-    if (rewriteData.missing_topics) {
-      const sorted = rewriteData.missing_topics
-        .filter(t => t.priority === '高')
-        .concat(rewriteData.missing_topics.filter(t => t.priority === '中'));
-
-      for (const topic of sorted) {
-        if (!topic.insert_after || !topic.suggested_heading) continue;
-        const insertPos = findSectionEndInsertPosition(content, topic.insert_after);
-        if (insertPos >= 0) {
-          const level = topic.heading_level || 2;
-          const newBlock = `\n\n<!-- wp:heading${level === 3 ? ' {"level":3}' : ''} -->\n<h${level} class="wp-block-heading">${topic.suggested_heading}</h${level}>\n<!-- /wp:heading -->\n\n<!-- wp:paragraph -->\n<p>${topic.content_outline}</p>\n<!-- /wp:paragraph -->`;
-          content = content.substring(0, insertPos) + newBlock + content.substring(insertPos);
-          Logger.log(`見出し追加: ${topic.suggested_heading}`);
-        }
-      }
-    }
-    return content;
-  } catch (e) {
-    Logger.log(`リライト適用エラー: ${e.message}`);
-    return null;
-  }
-}
+// リライト適用は seo_rewrite_markup.gs のStep 3で実行
 
 // ============================================================
 // シート操作
@@ -709,116 +653,107 @@ function createCompetitorCacheSheet(ss, candidates) {
   return sheet;
 }
 
-function writeRewriteResultSheet(ss, results, dateRange) {
-  const sheetName = REWRITE_CONFIG.REWRITE_SHEET_PREFIX + dateRange.end;
+function writeRewriteDesignSheet(ss, results) {
+  const sheetName = 'rewrite_design';
   let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
-    const h = ['記事URL','投稿ID','メインKW','現在順位','クリック数','表示回数','競合数','総合評価','目標順位','不足トピック','不要トピック','本文改善','構造変更','優先改善'];
-    sheet.getRange(1, 1, 1, 14).setValues([h]);
-    sheet.getRange(1, 1, 1, 14).setFontWeight('bold').setBackground('#2E7D32').setFontColor('#FFFFFF');
-    sheet.setColumnWidth(1, 400); sheet.setColumnWidth(8, 400);
-    sheet.setColumnWidth(10, 500); sheet.setColumnWidth(12, 500); sheet.setColumnWidth(14, 400);
-  }
-  const nextRow = sheet.getLastRow() + 1;
-  const rows = results.map(r => {
-    const p = r.rewritePlan;
-    return [r.url, r.postId, r.keyword, r.position, r.clicks, r.impressions, r.competitorCount,
-      p.overall_assessment||'', p.target_position||'',
-      formatMissingTopics(p.missing_topics), formatUnnecessaryTopics(p.unnecessary_topics),
-      formatContentImprovements(p.content_improvements), formatStructureChanges(p.structure_changes),
-      p.priority_summary||''];
-  });
-  if (rows.length > 0) sheet.getRange(nextRow, 1, rows.length, 14).setValues(rows);
-  Logger.log(`「${sheetName}」に${rows.length}件追記`);
-}
-
-function writeRewritePlanSheet(ss, results) {
-  const sheetName = REWRITE_CONFIG.REWRITE_PLAN_SHEET;
-  let sheet = ss.getSheetByName(sheetName);
-  if (!sheet) {
-    sheet = ss.insertSheet(sheetName);
-    const h = ['記事URL','投稿ID','メインKW','現在順位','リライト概要','不足トピック数','本文改善数','ステータス'];
-    sheet.getRange(1, 1, 1, 8).setValues([h]);
-    sheet.getRange(1, 1, 1, 8).setFontWeight('bold').setBackground('#2E7D32').setFontColor('#FFFFFF');
-    sheet.setColumnWidth(1, 400); sheet.setColumnWidth(5, 500); sheet.setColumnWidth(8, 100);
-    const sr = sheet.getRange(2, 8, 100, 1);
+    const h = ['記事URL','投稿ID','メインKW','順位','ペルソナ','検索意図分析','総合評価',
+      'セクション別計画','新規セクション','表現改善','古い情報','優先改善','追加メモ','ステータス','設計書JSON'];
+    sheet.getRange(1, 1, 1, 15).setValues([h]);
+    sheet.getRange(1, 1, 1, 15).setFontWeight('bold').setBackground('#1565C0').setFontColor('#FFFFFF');
+    sheet.setColumnWidth(1, 350); sheet.setColumnWidth(5, 300); sheet.setColumnWidth(6, 400);
+    sheet.setColumnWidth(7, 400); sheet.setColumnWidth(8, 500); sheet.setColumnWidth(9, 400);
+    sheet.setColumnWidth(10, 400); sheet.setColumnWidth(11, 300); sheet.setColumnWidth(12, 300);
+    sheet.setColumnWidth(13, 300); sheet.setColumnWidth(14, 100);
+    // JSON列は非表示
+    sheet.setColumnWidth(15, 50); sheet.hideColumns(15);
+    // ステータス条件付き書式
+    const sr = sheet.getRange(2, 14, 200, 1);
     sheet.setConditionalFormatRules([
-      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('承認待ち').setBackground('#E8F5E9').setRanges([sr]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('設計待ち').setBackground('#FFF3E0').setRanges([sr]).build(),
       SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('承認').setBackground('#C8E6C9').setFontColor('#1B5E20').setRanges([sr]).build(),
-      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('反映済み').setBackground('#BBDEFB').setRanges([sr]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('リライト済み').setBackground('#BBDEFB').setRanges([sr]).build(),
     ]);
   }
   const nextRow = sheet.getLastRow() + 1;
   const rows = results.map(r => {
     const p = r.rewritePlan;
-    return [r.url, r.postId, r.keyword, r.position, p.priority_summary||'',
-      (p.missing_topics||[]).length, (p.content_improvements||[]).length, '承認待ち'];
+    return [
+      r.url, r.postId, r.keyword,
+      `${r.position} → ${p.target_position || '?'}`,
+      formatPersona(p.persona),
+      formatSearchIntent(p.search_intent_analysis),
+      p.overall_assessment || '',
+      formatSectionPlan(p.section_plan),
+      formatNewSections(p.new_sections),
+      formatExpressionImprovements(p.expression_improvements),
+      formatOutdatedInfo(p.outdated_info),
+      p.priority_summary || '',
+      '', // 追加メモ（空）
+      '設計待ち',
+      JSON.stringify(p),
+    ];
   });
-  if (rows.length > 0) sheet.getRange(nextRow, 1, rows.length, 8).setValues(rows);
+  if (rows.length > 0) {
+    sheet.getRange(nextRow, 1, rows.length, 15).setValues(rows);
+    // テキスト列を折り返し表示
+    [5,6,7,8,9,10,11,12].forEach(col => {
+      sheet.getRange(nextRow, col, rows.length, 1).setWrap(true);
+    });
+  }
   Logger.log(`「${sheetName}」に${rows.length}件追記`);
 }
 
-function getLatestRewriteSheet(ss) {
-  const sheets = ss.getSheets().filter(s => s.getName().startsWith(REWRITE_CONFIG.REWRITE_SHEET_PREFIX));
-  if (sheets.length === 0) return null;
-  sheets.sort((a, b) => b.getName().localeCompare(a.getName()));
-  return sheets[0];
-}
-
-function getRewriteDataForUrl(sheet, url) {
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return null;
-  const data = sheet.getRange(2, 1, lastRow - 1, 14).getValues();
-  for (const row of data) {
-    if (row[0] === url) {
-      return { missing_topics: parseMissingTopicsFromSheet(row[9]), content_improvements: parseImprovementsFromSheet(row[11]) };
-    }
-  }
-  return null;
-}
-
-function parseMissingTopicsFromSheet(text) {
-  if (!text || text === 'なし') return [];
-  const topics = [];
-  for (const section of text.split(/\n\n/)) {
-    const hm = section.match(/\]\s*(.+)/);
-    const cm = section.match(/内容:\s*(.+)/);
-    if (hm) topics.push({
-      suggested_heading: hm[1].trim(), content_outline: cm ? cm[1].trim() : '',
-      insert_after: '', heading_level: 2,
-      priority: section.includes('[高]') ? '高' : section.includes('[中]') ? '中' : '低',
-    });
-  }
-  return topics;
-}
-
-function parseImprovementsFromSheet(text) {
-  if (!text || text === 'なし') return [];
-  const imps = [];
-  for (const section of text.split(/\n\n/)) {
-    const cm = section.match(/現在:\s*(.+?)(?:\.\.\.|$)/);
-    const im = section.match(/改善:\s*(.+?)(?:\.\.\.|$)/);
-    if (cm && im) imps.push({ current_text: cm[1].trim(), improved_text: im[1].trim() });
-  }
-  return imps;
-}
-
 // ============================================================
-// 出力フォーマット
+// リライト設計書のフォーマット関数
 // ============================================================
-function formatMissingTopics(t) {
-  if (!t||!t.length) return 'なし';
-  return t.map(x=>`[${x.priority}] ${x.suggested_heading}\n  競合: ${(x.found_in||[]).join(', ')}\n  内容: ${x.content_outline}\n  理由: ${x.seo_rationale}`).join('\n\n');
+function formatPersona(p) {
+  if (!p) return '(推定なし)';
+  const concerns = (p.concerns || []).map(c => `・${c}`).join('\n');
+  return `【${p.age_range || '?'}】${p.knowledge_level || '?'}
+状況: ${p.situation || ''}
+不安・疑問:
+${concerns}
+求める情報: ${p.desired_info || ''}`;
 }
-function formatUnnecessaryTopics(t) {
-  if (!t||!t.length) return 'なし';
-  return t.map(x=>`${x.action}: ${x.heading}\n  理由: ${x.reason}`).join('\n\n');
+
+function formatSearchIntent(s) {
+  if (!s) return '(分析なし)';
+  return `意図: ${s.primary_intent || ''}
+現状のズレ: ${s.current_alignment || ''}
+改善方向: ${s.improvement_direction || ''}`;
 }
-function formatContentImprovements(t) {
-  if (!t||!t.length) return 'なし';
-  return t.map(x=>`場所: ${x.location}\n  問題: ${x.issue}\n  現在: ${(x.current_text||'').substring(0,100)}...\n  改善: ${(x.improved_text||'').substring(0,100)}...\n  理由: ${x.seo_rationale}`).join('\n\n');
+
+function formatSectionPlan(sections) {
+  if (!sections || !sections.length) return 'なし';
+  return sections.map(s => {
+    const heading = s.new_heading ? `${s.h2_heading} → ${s.new_heading}` : s.h2_heading;
+    return `[${s.priority}][${s.action}] ${heading}\n  ${s.instructions}`;
+  }).join('\n\n');
 }
+
+function formatNewSections(sections) {
+  if (!sections || !sections.length) return 'なし';
+  return sections.map(s => {
+    return `[${s.priority}] ${s.suggested_heading}\n  挿入位置: ${s.insert_after}の後\n  概要: ${s.content_outline}\n  理由: ${s.seo_rationale}`;
+  }).join('\n\n');
+}
+
+function formatExpressionImprovements(imps) {
+  if (!imps || !imps.length) return 'なし';
+  return imps.map(x => {
+    return `場所: ${x.location}\n  問題: ${x.issue}\n  現在: ${x.current_text}\n  改善: ${x.improved_text}\n  理由: ${x.rationale}`;
+  }).join('\n\n');
+}
+
+function formatOutdatedInfo(items) {
+  if (!items || !items.length) return 'なし';
+  return items.map(x => {
+    return `[${x.priority}] ${x.location}\n  古い情報: ${x.current_info}\n  更新方向: ${x.update_needed}`;
+  }).join('\n\n');
+}
+
 function formatStructureChanges(t) {
   if (!t||!t.length) return 'なし';
   return t.map(x=>`${x.type}: ${x.current} → ${x.proposed}\n  理由: ${x.seo_rationale}`).join('\n\n');
