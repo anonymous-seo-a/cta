@@ -86,7 +86,14 @@ function runRewriteStep3() {
       const rawContent = wpPost.content.raw;
       Logger.log(`[B] WPコンテンツ取得: ${rawContent.length}文字 (${elapsed()}秒)`);
 
-      // 4. H2セクションに分割
+      // 4a. 注釈コンテキスト分析（カテゴリ判定 + スペック表記号定義の検出）
+      const annotationCtx = analyzeArticleAnnotationContext(rawContent);
+      const masterAnnotations = loadAnnotations(annotationCtx.category);
+      const masterRules = loadRules(annotationCtx.category);
+      const annotationPromptText = buildAnnotationPromptText(annotationCtx.category, annotationCtx.symbolMap);
+      Logger.log(`[B2] 注釈コンテキスト: カテゴリ=${annotationCtx.category}, 記号定義=${JSON.stringify(annotationCtx.symbolMap)}, 注釈${masterAnnotations.length}件, ルール${masterRules.length}件 (${elapsed()}秒)`);
+
+      // 4b. H2セクションに分割
       const sections = splitByH2(rawContent);
       Logger.log(`[C] H2分割: ${sections.length}セクション`);
       sections.forEach((s, idx) => {
@@ -135,8 +142,14 @@ function runRewriteStep3() {
         Logger.log(`  [${j}] リライト: ${section.heading || '(冒頭)'} (${elapsed()}秒)`);
         const stepStart = new Date().getTime();
 
+        // 問題A: 既存注釈をプレースホルダーに退避
+        const extracted = extractAnnotationsToPlaceholders(section.content);
+        if (extracted.annotations.length > 0) {
+          Logger.log(`    注釈退避: ${extracted.annotations.length}件`);
+        }
+
         const rewritten = callClaudeSectionRewrite({
-          sectionContent: section.content,
+          sectionContent: extracted.content, // プレースホルダー付き
           sectionHeading: section.heading,
           sectionIndex: j,
           totalSections: sections.length,
@@ -145,12 +158,24 @@ function runRewriteStep3() {
           newSectionsAfter: newSectionsHere,
           humanNotes: humanNotes,
           keyword: keyword,
+          annotationPromptText: annotationPromptText, // マスターデータ注入
         });
 
         const ms = new Date().getTime() - stepStart;
 
         if (rewritten) {
-          rewrittenSections.push(rewritten);
+          // 問題A: プレースホルダーを元の注釈に復元
+          let restored = restoreAnnotationsFromPlaceholders(rewritten, extracted.annotations);
+
+          // 問題B: ポスト処理（注釈検証・補完）
+          const postResult = postProcessAnnotations(restored, masterAnnotations, annotationCtx.symbolMap, masterRules);
+          restored = postResult.content;
+          if (postResult.fixes.length > 0) {
+            Logger.log(`    ポスト処理: ${postResult.fixes.length}件修正`);
+            postResult.fixes.forEach(f => Logger.log(`      ${f}`));
+          }
+
+          rewrittenSections.push(restored);
           Logger.log(`  [${j}] 完了: ${ms}ms`);
         } else {
           rewrittenSections.push(section.content);
@@ -284,7 +309,7 @@ function findNewSectionsAfter(design, heading) {
 // ============================================================
 function callClaudeSectionRewrite(params) {
   const apiKey = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
-  const systemPrompt = buildSectionRewriteSystemPrompt();
+  const systemPrompt = buildSectionRewriteSystemPrompt() + (params.annotationPromptText || '');
   const userPrompt = buildSectionRewriteUserPrompt(params);
 
   try {
@@ -327,8 +352,10 @@ function buildSectionRewriteSystemPrompt() {
 1. 出力はWordPressのGutenbergブロックマークアップのみ。説明文やJSON等は一切出力しない
 2. CTA関連ブロック（<!-- wp:soico-cta/ で始まるもの）は一字一句変更せずそのまま出力すること
 3. 再利用ブロック（<!-- wp:block {"ref":数字} /-->）は一字一句変更せずそのまま出力すること
-4. 景品表示法・金融商品取引法に抵触する表現は使用しない
-5. 古い情報は最新の情報に更新する。ただし確信がない数値・日付は「※最新情報をご確認ください」と注記する
+4. %%ANNOT_xxx%% プレースホルダーは既存の必須注釈。絶対に削除・変更せず、元の位置にそのまま出力すること
+5. 景品表示法・金融商品取引法に抵触する表現は使用しない
+6. 古い情報は最新の情報に更新する。ただし確信がない数値・日付は「※最新情報をご確認ください」と注記する
+7. 商材（金融サービス）のスペック数値（金利・限度額・審査時間等）は変更しないこと。不明な場合は元の表記を維持する
 
 ## コンテンツルール
 - ペルソナの不安・疑問に直接答える内容にすること
