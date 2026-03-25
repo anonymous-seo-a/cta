@@ -9,8 +9,9 @@
 const ANNOTATION_CONFIG = {
   ANNOTATIONS_SHEET: 'master_annotations',
   RULES_SHEET: 'master_rules',
-  PLACEHOLDER_PREFIX: '%%ANNOT_',
-  PLACEHOLDER_SUFFIX: '%%',
+  // Claude APIが%を消すため、角括弧ベースのプレースホルダーに変更
+  PLACEHOLDER_PREFIX: '[KEEP_ANNOTATION_',
+  PLACEHOLDER_SUFFIX: ']',
 };
 
 // ============================================================
@@ -180,8 +181,7 @@ function extractAnnotationsToPlaceholders(content) {
   });
 
   // パターン4: 段落内の※で始まるインライン注釈（句点・改行・タグまで）
-  // ただし上記で既にプレースホルダー化されたものは除外
-  result = result.replace(/(?<!%%ANNOT_\d{3})※[^<\n%%]{5,}/g, (match) => {
+  result = result.replace(/(?<!\[KEEP_ANNOTATION_\d{3})※[^<\n\[]{5,}/g, (match) => {
     // プレースホルダー自体を置換しないようガード
     if (match.includes(ANNOTATION_CONFIG.PLACEHOLDER_PREFIX)) return match;
     const idx = annotations.length;
@@ -341,7 +341,7 @@ function buildAnnotationPromptText(category, symbolMap) {
   }
 
   text += '### プレースホルダールール\n';
-  text += '%%ANNOT_xxx%% の形式のプレースホルダーは既存の注釈です。絶対に削除・変更せず、そのまま出力してください。\n';
+  text += '[KEEP_ANNOTATION_xxx] の形式のプレースホルダーは既存の注釈です。絶対に削除・変更せず、そのまま出力してください。\n';
 
   return text;
 }
@@ -407,7 +407,7 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
       // 既に注釈が存在するか
       const hasSymbolRef = ann.symbol && result.includes(`(${ann.symbol})`);
       const hasInlineAnnotation = result.includes(ann.annotationText);
-      const hasPlaceholderAnnotation = /%%ANNOT_\d{3}%%/.test(result); // 既にプレースホルダーがある
+      const hasPlaceholderAnnotation = /\[KEEP_ANNOTATION_\d{3}\]/.test(result); // 既にプレースホルダーがある
 
       if (hasSymbolRef || hasInlineAnnotation) continue; // 既にある
 
@@ -421,7 +421,7 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
 
         // 既にこの位置の直後に注釈やプレースホルダーがないか
         const afterText = result.substring(afterKw, afterKw + 20);
-        if (afterText.startsWith('(※') || afterText.startsWith('%%ANNOT_')) continue;
+        if (afterText.startsWith('(※') || afterText.startsWith('[KEEP_ANNOTATION_')) continue;
 
         let insertText;
         if (symbolMap[ann.symbol]) {
