@@ -425,16 +425,16 @@ function scrapeArticleStructureRewrite(url) {
     }
 
     const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+    const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/<[^>]+>/g, '').trim()) : '';
 
     const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-    const h1 = h1Match ? h1Match[1].replace(/<[^>]+>/g, '').trim() : '';
+    const h1 = h1Match ? decodeHtmlEntities(h1Match[1].replace(/<[^>]+>/g, '').trim()) : '';
 
     const headings = [];
     const headingRegex = /<h([23])[^>]*>([\s\S]*?)<\/h\1>/gi;
     let m;
     while ((m = headingRegex.exec(html)) !== null) {
-      const text = m[2].replace(/<[^>]+>/g, '').trim();
+      const text = decodeHtmlEntities(m[2].replace(/<[^>]+>/g, '').trim());
       if (text.length > 0 && text.length < 200) {
         headings.push({ level: parseInt(m[1]), text });
       }
@@ -445,7 +445,7 @@ function scrapeArticleStructureRewrite(url) {
     let totalLength = 0;
     const maxLen = REWRITE_CONFIG.MAX_CONTENT_SUMMARY;
     while ((m = pRegex.exec(html)) !== null && totalLength < maxLen) {
-      const text = m[1].replace(/<[^>]+>/g, '').trim();
+      const text = decodeHtmlEntities(m[1].replace(/<[^>]+>/g, '').trim());
       if (text.length > 20) { paragraphs.push(text); totalLength += text.length; }
     }
 
@@ -605,14 +605,14 @@ function buildRewriteSystemPrompt() {
 
 function buildRewriteUserPrompt(params) {
   const ownHeadings = params.ownStructure.headings
-    .map(h => `${'  '.repeat(h.level - 2)}${h.level === 2 ? '##' : '###'} ${h.text}`)
+    .map(h => `${'  '.repeat(h.level - 2)}${h.level === 2 ? '##' : '###'} ${decodeHtmlEntities(h.text)}`)
     .join('\n');
 
   const competitorTexts = params.competitors.map(c => {
     const headings = c.structure.headings
-      .map(h => `${'  '.repeat(h.level - 2)}${h.level === 2 ? '##' : '###'} ${h.text}`)
+      .map(h => `${'  '.repeat(h.level - 2)}${h.level === 2 ? '##' : '###'} ${decodeHtmlEntities(h.text)}`)
       .join('\n');
-    const summary = (c.structure.contentSummary || '').substring(0, 300);
+    const summary = decodeHtmlEntities((c.structure.contentSummary || '').substring(0, 300));
     return `【競合${c.rank}位】${c.title}\nURL: ${c.url}\n見出し数: ${c.structure.headingCount}\n${headings}\n\n本文概要:\n${summary}`;
   }).join('\n\n---\n\n');
 
@@ -620,9 +620,11 @@ function buildRewriteUserPrompt(params) {
     .map(k => `${k.keyword}（クリック${k.clicks}, 順位${Math.round(k.position * 10) / 10}）`)
     .join('\n');
 
-  const ownSummary = (params.ownStructure.contentSummary || '').substring(0, 800);
+  const ownSummary = decodeHtmlEntities((params.ownStructure.contentSummary || '').substring(0, 800));
 
   return `以下の記事をリライト分析してください。
+
+※注意: 見出しや本文に &amp; &lt; &gt; 等のHTMLエンティティが含まれる場合がありますが、これは文字化けではありません。正常なHTMLエンコーディングです。「文字化け」として扱わないでください。
 
 【自サイト記事】
 URL: ${params.articleUrl}
@@ -771,6 +773,22 @@ function formatOutdatedInfo(items) {
 function formatStructureChanges(t) {
   if (!t||!t.length) return 'なし';
   return t.map(x=>`${x.type}: ${x.current} → ${x.proposed}\n  理由: ${x.seo_rationale}`).join('\n\n');
+}
+
+// ============================================================
+// ユーティリティ
+// ============================================================
+function decodeHtmlEntities(text) {
+  if (!text) return '';
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (m, dec) => String.fromCharCode(parseInt(dec, 10)));
 }
 
 // ============================================================
