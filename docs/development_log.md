@@ -1,5 +1,45 @@
 # 開発ログ
 
+## 2026-03-26: Session 4
+
+### 機能3: SEOリライト — テスト実行＋注釈マスターデータ＋バグ修正
+
+**テスト実行結果:**
+- Step 2（runRewritePhase2）: 成功。rewrite_designシートに設計書出力（ペルソナ・検索意図・セクション計画）
+- Step 3（runRewriteStep3）: 15セクションの記事を3回の実行で全セクション処理完了。Google Drive保存も成功
+
+**新規実装: 注釈マスターデータシステム（annotation_master.gs）**
+- master_annotationsシート: 商材別必須注釈（カードローン4社15件）
+- master_rulesシート: 禁止表現・必須表現・正式表記ルール（21件）
+- 問題A（既存注釈を消さない）: プレースホルダー退避→復元方式
+  - 形式: `[KEEP_ANNOTATION_xxx]`（`%%ANNOT_xxx%%`はClaude APIに壊されるため変更）
+- 問題B（新規テキストに注釈を挿入）: 案C（Claude APIプロンプト注入＋ポスト処理検証）
+  - Claude APIにmaster_annotations/rulesを渡してルール遵守を指示
+  - 出力後にpostProcessAnnotationsで禁止表現削除・必須表現置換・不足注釈補完
+  - スペック表パターンブロック内に※a/※p等の定義がある場合は記号参照のみ、なければインライン注釈
+
+**解決したバグ:**
+- MAX_TOKENS 4096不足 → 8192に増量＋切れたJSON修復処理（repairTruncatedJson）
+- HTMLエンティティ（&amp;等）をClaude APIが「文字化け」と誤認 → decodeHtmlEntities関数追加
+- GAS定数名衝突（STEP3_CONFIG重複）→ REWRITE_STEP3にリネーム
+- GAS 5分タイムアウト → rewrite_progressシートによる再開可能設計
+- Spreadsheetセル50,000文字制限 → Google Drive保存に変更
+- Google Drive APIが未有効化 → GCPプロジェクトでDrive API有効化で解決
+- プレースホルダー `%%ANNOT_xxx%%` がClaude APIで壊れる → `[KEEP_ANNOTATION_xxx]` に変更
+
+**未完了・後日対応:**
+- master_annotationsの他カテゴリ拡張（証券・暗号資産・FX）
+- master_specs（商材スペック）: エンジニアからのデータ回収待ち
+- master_rulesの拡充: 他カテゴリのクライアントレギュレーション受領後
+- 生成された全文マークアップのWP表示確認
+- カードローン記事での注釈処理の実動作検証
+
+**GCPプロジェクト設定メモ:**
+- プロジェクトID: 377655326123
+- 有効化済みAPI: Analytics Data API, Search Console API, **Google Drive API**（Session 4で追加）
+
+---
+
 ## 2026-03-25: Session 3
 
 ### 機能3: SEOリライト — 全面再設計

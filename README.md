@@ -9,7 +9,7 @@ soico（金融アフィリエイトメディア soico.jp/no1/）のCVR改善とS
 |---|---|---|---|---|
 | 1 | **CVR診断** | ✅ 完了・運用中 | main.gs | GA4/GSCデータ→Claude API診断→週次レポート |
 | 2 | **CTA自動挿入** | ✅ 完了・運用中 | cta_insertion.gs | 診断結果→CTA挿入計画→承認→WordPress反映 |
-| 3 | **SEOリライト** | 🔧 Phase 2.5完了 | seo_rewrite.gs, seo_rewrite_markup.gs | 競合分析→リライト案→マークアップ生成→承認→入稿 |
+| 3 | **SEOリライト** | 🔧 Step 3テスト完了 | seo_rewrite.gs, seo_rewrite_markup.gs, annotation_master.gs | 競合分析→設計書→セクション別リライト→全文出力→承認→入稿 |
 
 共通基盤: **gsc_master.gs**（GSCデータ一元管理、日次バッチ）
 
@@ -136,8 +136,9 @@ Phase 3: 承認済みマークアップを自動入稿                      ✅ 
 │   ├── main.gs              # 機能1: CVR診断
 │   ├── cta_insertion.gs     # 機能2: CTA挿入
 │   ├── gsc_master.gs        # 共通: GSCデータ一元管理
-│   ├── seo_rewrite.gs       # 機能3: SEOリライト Phase 1-2
-│   ├── seo_rewrite_markup.gs # 機能3: SEOリライト Phase 2.5-3
+│   ├── seo_rewrite.gs       # 機能3: SEOリライト Step 1-2
+│   ├── seo_rewrite_markup.gs # 機能3: SEOリライト Step 3-4
+│   ├── annotation_master.gs  # 機能3: 注釈マスターデータ管理
 │   └── appsscript.json      # OAuthスコープ設定
 ├── prompts/
 │   ├── cvr_diagnosis_prompt_v1.md
