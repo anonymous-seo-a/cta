@@ -433,6 +433,14 @@ function applyApprovedFulltext() {
       Logger.log(`更新成功`);
       sheet.getRange(rowNum, 7).setValue('入稿済み');
       applied++;
+
+      // Googleに更新通知
+      const notified = notifyGoogleUrlUpdated(pageUrl);
+      if (notified) {
+        Logger.log(`  Google通知: 成功`);
+      } else {
+        Logger.log(`  Google通知: 失敗（入稿自体は成功）`);
+      }
     } else {
       Logger.log('更新失敗');
       sheet.getRange(rowNum, 7).setValue('入稿失敗');
@@ -457,6 +465,39 @@ function readFromGoogleDrive(driveUrl) {
   } catch (e) {
     Logger.log(`Drive読み取りエラー: ${e.message}`);
     return null;
+  }
+}
+
+// ============================================================
+// Google Indexing API: URL更新通知
+// ============================================================
+function notifyGoogleUrlUpdated(url) {
+  const endpoint = 'https://indexing.googleapis.com/v3/urlNotifications:publish';
+
+  try {
+    const response = UrlFetchApp.fetch(endpoint, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'Authorization': 'Bearer ' + ScriptApp.getOAuthToken(),
+      },
+      payload: JSON.stringify({
+        url: url,
+        type: 'URL_UPDATED',
+      }),
+      muteHttpExceptions: true,
+    });
+
+    const code = response.getResponseCode();
+    if (code === 200) {
+      return true;
+    } else {
+      Logger.log(`  Indexing API エラー: ${code} - ${response.getContentText().substring(0, 200)}`);
+      return false;
+    }
+  } catch (e) {
+    Logger.log(`  Indexing API 例外: ${e.message}`);
+    return false;
   }
 }
 
