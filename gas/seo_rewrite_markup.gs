@@ -324,7 +324,6 @@ function clearProgress(ss, postId) {
 // Google Drive保存
 // ============================================================
 function saveToGoogleDrive(postId, keyword, fullText) {
-  // 出力フォルダを取得or作成
   let folders = DriveApp.getFoldersByName(REWRITE_STEP3.DRIVE_FOLDER_NAME);
   let folder;
   if (folders.hasNext()) {
@@ -336,10 +335,32 @@ function saveToGoogleDrive(postId, keyword, fullText) {
   const dateStr = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm');
   const fileName = `rewrite_${postId}_${keyword}_${dateStr}.html`;
 
-  const file = folder.createFile(fileName, fullText, MimeType.HTML);
-  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  // 最大3回リトライ
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const file = folder.createFile(fileName, fullText, MimeType.HTML);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      return file.getUrl();
+    } catch (e) {
+      Logger.log(`  Drive保存エラー (試行${attempt}/3): ${e.message}`);
+      if (attempt < 3) {
+        Utilities.sleep(3000 * attempt); // 3秒, 6秒 待機
+      }
+    }
+  }
 
-  return file.getUrl();
+  // 3回失敗 → PropertiesServiceにキーを保存して後で取り出せるようにする
+  Logger.log('  Drive保存3回失敗。ScriptPropertiesにバックアップ保存。');
+  const key = `rewrite_backup_${postId}`;
+  // PropertiesServiceは9KB制限があるので分割保存
+  const chunkSize = 8000;
+  const chunks = Math.ceil(fullText.length / chunkSize);
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(key + '_chunks', String(chunks));
+  for (let i = 0; i < chunks; i++) {
+    props.setProperty(key + '_' + i, fullText.substring(i * chunkSize, (i + 1) * chunkSize));
+  }
+  return `BACKUP:${key}(${chunks}chunks)`;
 }
 
 // ============================================================
@@ -652,6 +673,48 @@ ${notesText}
 ---
 【現在のセクション】
 ${params.sectionContent}`;
+}
+
+// ============================================================
+// バックアップからDrive保存をリトライ
+// ============================================================
+function retryDriveSaveFromBackup(postId) {
+  const key = `rewrite_backup_${postId}`;
+  const props = PropertiesService.getScriptProperties();
+  const chunks = parseInt(props.getProperty(key + '_chunks') || '0');
+  if (chunks === 0) { Logger.log('バックアップが見つかりません'); return; }
+
+  let fullText = '';
+  for (let i = 0; i < chunks; i++) {
+    fullText += props.getProperty(key + '_' + i) || '';
+  }
+  Logger.log(`バックアップから復元: ${fullText.length}文字`);
+
+  const driveUrl = saveToGoogleDrive(postId, 'retry', fullText);
+  Logger.log(`Drive保存結果: ${driveUrl}`);
+
+  if (driveUrl && !driveUrl.startsWith('BACKUP:')) {
+    // バックアップを削除
+    for (let i = 0; i < chunks; i++) {
+      props.deleteProperty(key + '_' + i);
+    }
+    props.deleteProperty(key + '_chunks');
+    Logger.log('バックアップ削除完了');
+
+    // rewrite_fulltextシートを更新
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(REWRITE_STEP3.FULLTEXT_SHEET);
+    if (sheet) {
+      const lastRow = sheet.getLastRow();
+      for (let i = 2; i <= lastRow; i++) {
+        if (sheet.getRange(i, 2).getValue() == postId) {
+          sheet.getRange(i, 6).setValue(driveUrl);
+          Logger.log(`rewrite_fulltextシート更新: 行${i}`);
+          break;
+        }
+      }
+    }
+  }
 }
 
 // ============================================================
