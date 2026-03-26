@@ -7,6 +7,7 @@ const REWRITE_CONFIG = {
   MAX_POSITION: 20,
   MIN_CLICKS: 10,
   TOP_N_REWRITE: 10,
+  TARGET_CATEGORIES: ['cardloan', 'fx', 'cryptocurrency', 'securities'],
   COMPETITORS_PER_KW: 5,
   MAX_COMPETITORS_SCRAPE: 2,
 
@@ -44,13 +45,14 @@ const REWRITE_CONFIG = {
 // ============================================================
 // Phase 1: 競合URL取得
 // ============================================================
-function runRewritePhase1() {
+// filterCategory: 'cardloan'等を指定すると、そのカテゴリのみ候補選定
+function runRewritePhase1(filterCategory) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let cacheSheet = ss.getSheetByName(REWRITE_CONFIG.COMPETITOR_CACHE_SHEET);
 
   if (!cacheSheet) {
     Logger.log('=== リライト候補選定（gsc_masterから） ===');
-    const candidates = getRewriteCandidates(REWRITE_CONFIG.TOP_N_REWRITE);
+    const candidates = getRewriteCandidates(REWRITE_CONFIG.TOP_N_REWRITE, filterCategory);
 
     if (candidates.length === 0) {
       Logger.log('リライト候補がありません。refreshGscMasterを実行済みか確認してください。');
@@ -889,3 +891,11 @@ function testSingleRewrite() {
     Logger.log(`優先: ${plan.priority_summary}`);
   } else Logger.log('生成失敗');
 }
+
+// ============================================================
+// カテゴリ別 Phase 1 ラッパー（GASエディタから直接実行用）
+// ============================================================
+function runRewritePhase1_Cardloan() { runRewritePhase1('cardloan'); }
+function runRewritePhase1_FX() { runRewritePhase1('fx'); }
+function runRewritePhase1_Crypto() { runRewritePhase1('cryptocurrency'); }
+function runRewritePhase1_Securities() { runRewritePhase1('securities'); }

@@ -325,9 +325,13 @@ function getTopPagesForDiagnosis(ga4Data, topN) {
 }
 
 // リライト用: 順位4-20、クリック10以上の改善余地がある記事
-function getRewriteCandidates(topN) {
+// カテゴリ均等選定（ラウンドロビン）。filterCategory指定時はそのカテゴリのみ。
+function getRewriteCandidates(topN, filterCategory) {
   const gscPages = readGscMaster();
   if (gscPages.length === 0) return [];
+
+  const targetCategories = REWRITE_CONFIG.TARGET_CATEGORIES || ['cardloan', 'fx', 'cryptocurrency', 'securities'];
+  const maxTotal = topN || REWRITE_CONFIG.TOP_N_REWRITE;
 
   const candidates = gscPages.filter(p =>
     p.position >= REWRITE_CONFIG.MIN_POSITION &&
@@ -343,8 +347,40 @@ function getRewriteCandidates(topN) {
     c.improvementScore = c.impressions * (1 - ctr) * positionWeight;
   });
 
-  candidates.sort((a, b) => b.improvementScore - a.improvementScore);
-  return candidates.slice(0, topN || REWRITE_CONFIG.TOP_N_REWRITE);
+  // 特定カテゴリのみの場合
+  if (filterCategory) {
+    const filtered = candidates.filter(c => c.category === filterCategory);
+    filtered.sort((a, b) => b.improvementScore - a.improvementScore);
+    Logger.log(`リライト候補（${filterCategory}のみ）: ${filtered.length}件中 上位${Math.min(filtered.length, maxTotal)}件`);
+    return filtered.slice(0, maxTotal);
+  }
+
+  // カテゴリ別にグループ化 & スコア順ソート
+  const byCategory = {};
+  for (const cat of targetCategories) {
+    byCategory[cat] = candidates
+      .filter(c => c.category === cat)
+      .sort((a, b) => b.improvementScore - a.improvementScore);
+  }
+
+  // ラウンドロビンで均等選定
+  const result = [];
+  let round = 0;
+  while (result.length < maxTotal) {
+    let added = false;
+    for (const cat of targetCategories) {
+      if (result.length >= maxTotal) break;
+      if (byCategory[cat] && byCategory[cat][round]) {
+        result.push(byCategory[cat][round]);
+        added = true;
+      }
+    }
+    if (!added) break; // 全カテゴリ枯渇
+    round++;
+  }
+
+  Logger.log(`リライト候補: ${result.length}件（${targetCategories.map(cat => `${cat}:${byCategory[cat] ? Math.min(byCategory[cat].length, round + 1) : 0}`).join(', ')}）`);
+  return result;
 }
 
 // ============================================================
