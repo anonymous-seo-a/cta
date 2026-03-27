@@ -199,16 +199,8 @@ function runRewriteStep3() {
     const ms = new Date().getTime() - stepStart;
 
     if (rewritten) {
-      let restored = restoreAnnotationsFromPlaceholders(rewritten, extracted.annotations);
-      const postResult = postProcessAnnotations(restored, masterAnnotations, annotationCtx.symbolMap, masterRules);
-      restored = postResult.content;
-      if (postResult.fixes.length > 0) {
-        Logger.log(`    ポスト処理: ${postResult.fixes.length}件修正`);
-        postResult.fixes.forEach(f => Logger.log(`      ${f}`));
-      }
-      if (postResult.footnotes.length > 0) {
-        Logger.log(`    番号注釈: ${postResult.footnotes.length}件追加`);
-      }
+      const restored = restoreAnnotationsFromPlaceholders(rewritten, extracted.annotations);
+      // 注釈postProcessはセクション単位では実行しない（全文結合後に一括処理）
       saveProcessedSection(ss, targetPostId, j, restored);
       Logger.log(`  [${j}] 完了: ${ms}ms`);
     } else {
@@ -233,8 +225,27 @@ function runRewriteStep3() {
   for (let j = 0; j < sections.length; j++) {
     orderedSections.push(allProcessed[j] || sections[j].content);
   }
-  const fullText = orderedSections.join('\n\n');
-  Logger.log(`  全文: ${fullText.length}文字`);
+  let fullText = orderedSections.join('\n\n');
+  Logger.log(`  全文（注釈処理前）: ${fullText.length}文字`);
+
+  // 4.5. 全文に対して注釈一括処理
+  // (1) 全文から商材注釈を除去（出典リンク・記号定義行は退避）
+  const fullExtracted = extractAnnotationsToPlaceholders(fullText);
+  Logger.log(`[D2] 全文注釈除去: ${fullExtracted.annotations.length}件退避 (${elapsed()}秒)`);
+
+  // (2) 全KW出現箇所に注釈を統一挿入
+  const fullPostResult = postProcessAnnotations(fullExtracted.content, masterAnnotations, annotationCtx.symbolMap, masterRules);
+  if (fullPostResult.fixes.length > 0) {
+    Logger.log(`[D3] 全文ポスト処理: ${fullPostResult.fixes.length}件修正`);
+    fullPostResult.fixes.forEach(f => Logger.log(`  ${f}`));
+  }
+  if (fullPostResult.footnotes.length > 0) {
+    Logger.log(`  番号注釈: ${fullPostResult.footnotes.length}件追加`);
+  }
+
+  // (3) 退避した出典リンク・記号定義行を復元
+  fullText = restoreAnnotationsFromPlaceholders(fullPostResult.content, fullExtracted.annotations);
+  Logger.log(`[D4] 全文注釈処理完了: ${fullText.length}文字 (${elapsed()}秒)`);
 
   // 5. Google Driveに保存
   const driveUrl = saveToGoogleDrive(targetPostId, targetKeyword, fullText);
