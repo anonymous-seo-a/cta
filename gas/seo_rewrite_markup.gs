@@ -153,15 +153,18 @@ function runRewriteStep3() {
       continue;
     }
 
-    // 削除（再利用ブロック・CTAブロックを含むセクションは削除禁止→維持に強制変更）
+    // 再利用ブロック・CTAブロックを含むセクションは設計書の指示に関わらず強制維持
+    if (section.hasReusable || section.hasCta) {
+      Logger.log(`  [${j}] 強制維持（再利用/CTAブロック保護）: ${section.heading || '(冒頭)'}`);
+      saveProcessedSection(ss, targetPostId, j, section.content);
+      newCompletions++;
+      continue;
+    }
+
+    // 削除（再利用/CTAブロック含有セクションは上の強制維持で除外済み）
     if (sectionDesign && sectionDesign.action === '削除') {
-      if (section.hasReusable || section.hasCta) {
-        Logger.log(`  [${j}] 削除→維持に変更（再利用/CTAブロック保護）: ${section.heading}`);
-        saveProcessedSection(ss, targetPostId, j, section.content);
-      } else {
-        Logger.log(`  [${j}] 削除: ${section.heading}`);
-        saveProcessedSection(ss, targetPostId, j, '');
-      }
+      Logger.log(`  [${j}] 削除: ${section.heading}`);
+      saveProcessedSection(ss, targetPostId, j, '');
       newCompletions++;
       continue;
     }
@@ -629,6 +632,7 @@ function buildSectionRewriteSystemPrompt() {
 6. 古い情報は最新の情報に更新する。ただし確信がない数値・日付は「※最新情報をご確認ください」と注記する
 7. 商材（金融サービス）のスペック数値（金利・限度額・審査時間等）は変更しないこと。不明な場合は元の表記を維持する
 8. 見出しタグ（h2, h3）に既存のid属性がある場合、そのid属性を必ず保持すること。例: <h3 class="wp-block-heading" id="id06"> → idを維持
+9. カスタムHTML（<div class="box-004"> 等のボックス、カスタムスタイルのdivなど）は必ず <!-- wp:html --> と <!-- /wp:html --> で囲むこと。このラッパーがないとWordPressが正しくレンダリングしない
 
 ## 注釈に関する絶対ルール
 - 注釈（※で始まるテキスト）は自分で挿入しないこと。注釈はポスト処理で自動挿入される
@@ -656,9 +660,26 @@ function buildSectionRewriteSystemPrompt() {
 <p>テキスト</p>
 <!-- /wp:paragraph -->
 
-ボックス: <div class="box-004">注意テキスト</div> / <div class="box-006">補足テキスト</div> / <div class="box-008">ポイントテキスト</div>
+ボックス（必ず <!-- wp:html --> で囲むこと）:
+<!-- wp:html -->
+<div class="box-004">
+<p>注意テキスト</p>
+</div>
+<!-- /wp:html -->
 
-重要: ボックス（box-004, box-006, box-008）内には<p>タグ1つだけを入れること。<ul>や<li>は入れてはいけない。リスト表示が必要な場合は、ボックスの外側でwp:listブロックを使うこと。
+<!-- wp:html -->
+<div class="box-006">
+<p>補足テキスト</p>
+</div>
+<!-- /wp:html -->
+
+<!-- wp:html -->
+<div class="box-008">
+<p>ポイントテキスト</p>
+</div>
+<!-- /wp:html -->
+
+重要: ボックス（box-004, box-006, box-008）は必ず <!-- wp:html --> と <!-- /wp:html --> で囲むこと。ボックス内には<p>タグ1つだけを入れること。<ul>や<li>は入れてはいけない。リスト表示が必要な場合は、ボックスの外側でwp:listブロックを使うこと。
 
 強調: <strong><mark class="has-inline-color has-gold-color" style="background-color:rgba(0, 0, 0, 0)">テキスト</mark></strong>
 
