@@ -358,6 +358,18 @@ function buildAnnotationPromptText(category, symbolMap) {
 function postProcessAnnotations(content, annotations, symbolMap, rules) {
   let result = content;
   const fixes = [];
+  const usedFootnotes = {}; // { number: annotationText } — このセクションで使った番号注釈
+
+  // 番号マッピング: annotationText → ※N番号（symbolMap未定義の注釈のみ）
+  // master_annotationsの順序に基づいて決定的に割り当て（記事全体で一意）
+  const numberMap = {};
+  let nextNum = 1;
+  for (const ann of annotations) {
+    if (symbolMap[ann.symbol]) continue; // symbolMap定義あり → 番号不要
+    if (!numberMap[ann.annotationText]) {
+      numberMap[ann.annotationText] = nextNum++;
+    }
+  }
 
   // 1. 禁止表現チェック（常時適用）
   const ngRules = rules.filter(r => r.ruleType === '禁止表現' && r.condition === '常に');
@@ -389,42 +401,21 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
   }
 
   // 3. 商材注釈を全トリガーKW出現箇所に挿入
-  // （extractAnnotationsToPlaceholdersで既存注釈は全て除去済み）
   const productNames = [...new Set(annotations.map(a => a.productName))];
-
-  // 3a. セクション内で言及されている商材数をカウント（まとめ段落検出用）
-  const mentionedProducts = productNames.filter(name => result.includes(name));
-  const isMultiProductSection = mentionedProducts.length >= 3;
-  if (isMultiProductSection) {
-    fixes.push(`複数商材言及セクション（${mentionedProducts.length}社）: 個別注釈の自動挿入をスキップ`);
-  }
 
   for (const productName of productNames) {
     if (!result.includes(productName)) continue;
 
     const productAnnotations = annotations.filter(a => a.productName === productName);
     for (const ann of productAnnotations) {
-      // トリガーKWが存在するか
       const triggerFound = ann.triggerKws.some(kw => result.includes(kw));
       if (!triggerFound) continue;
 
-      // 複数商材言及セクションでは個別注釈を自動挿入しない
-      if (isMultiProductSection) continue;
-
-      // 注釈テキストを決定
-      let insertText;
-      if (symbolMap[ann.symbol]) {
-        insertText = `(${ann.symbol})`;
-      } else {
-        insertText = `<span style="font-size:12px!important; color:#888!important;">※${ann.annotationText}</span>`;
-      }
-
-      // 全てのトリガーKW出現箇所に注釈を挿入（後方から処理してインデックスずれを防止）
       let inserted = false;
       for (const kw of ann.triggerKws) {
         if (!result.includes(kw)) continue;
 
-        // KWの全出現位置を収集（後方から処理するために逆順）
+        // KWの全出現位置を収集（後方から処理）
         const positions = [];
         let searchFrom = 0;
         while (true) {
@@ -433,43 +424,73 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
           positions.push(idx);
           searchFrom = idx + kw.length;
         }
-        positions.reverse(); // 後方から処理
+        positions.reverse();
 
         for (const kwIndex of positions) {
           const afterKw = kwIndex + kw.length;
 
-          // 段落レベルで3社以上言及をチェック
-          const pStart = result.lastIndexOf('<p>', kwIndex);
-          const pEnd = result.indexOf('</p>', kwIndex);
-          if (pStart >= 0 && pEnd >= 0) {
-            const paragraph = result.substring(pStart, pEnd);
-            const productsInParagraph = productNames.filter(name => paragraph.includes(name));
-            if (productsInParagraph.length >= 3) continue;
-          }
+          // HTML属性値内（href, src, style等）のKW出現はスキップ
+          const beforeKw = result.substring(Math.max(0, kwIndex - 300), kwIndex);
+          const lastOpenTag = beforeKw.lastIndexOf('<');
+          const lastCloseTag = beforeKw.lastIndexOf('>');
+          if (lastOpenTag > lastCloseTag) continue;
 
           // 直後に既に注釈がないか確認
           const afterText = result.substring(afterKw, afterKw + 30);
           if (afterText.startsWith('(※') || afterText.startsWith('<span style="font-size:1')) continue;
 
-          // HTMLタグの中にあるKW出現はスキップ（href属性やalt属性内など）
-          const beforeKw = result.substring(Math.max(0, kwIndex - 200), kwIndex);
-          const lastOpenTag = beforeKw.lastIndexOf('<');
-          const lastCloseTag = beforeKw.lastIndexOf('>');
-          if (lastOpenTag > lastCloseTag) continue; // タグの中にいる
+          // 注釈形式を決定
+          let insertText;
+          if (symbolMap[ann.symbol]) {
+            // symbolMap定義あり → 記号参照
+            insertText = `(${ann.symbol})`;
+          } else {
+            // symbolMap定義なし → 段落内の商材数で分岐
+            const pStart = result.lastIndexOf('<p>', kwIndex);
+            const pEnd = result.indexOf('</p>', kwIndex);
+            let productsInContext = 1;
+            if (pStart >= 0 && pEnd >= 0) {
+              const paragraph = result.substring(pStart, pEnd);
+              productsInContext = productNames.filter(name => paragraph.includes(name)).length;
+            }
+
+            if (productsInContext >= 3) {
+              // 3社以上 → 番号参照
+              const num = numberMap[ann.annotationText];
+              insertText = `(※${num})`;
+              usedFootnotes[num] = ann.annotationText;
+            } else {
+              // 2社以下 → インライン注釈
+              insertText = `<span style="font-size:12px!important; color:#888!important;">※${ann.annotationText}</span>`;
+            }
+          }
 
           result = result.substring(0, afterKw) + insertText + result.substring(afterKw);
           inserted = true;
         }
 
         if (inserted) {
-          fixes.push(`注釈挿入: 「${kw}」(${positions.length}箇所)の後に${symbolMap[ann.symbol] ? ann.symbol + '記号' : 'インライン注釈'}を挿入`);
-          break; // このannotationの処理完了（別のトリガーKWは不要）
+          const mode = symbolMap[ann.symbol] ? ann.symbol + '記号' : (Object.values(usedFootnotes).includes(ann.annotationText) ? '番号参照' : 'インライン');
+          fixes.push(`注釈挿入: 「${kw}」(${positions.length}箇所) → ${mode}`);
+          break;
         }
       }
     }
   }
 
-  return { content: result, fixes: fixes };
+  // 4. セクション末尾に番号注釈リストを追加（使用分のみ）
+  const footnoteNumbers = Object.keys(usedFootnotes).map(Number).sort((a, b) => a - b);
+  if (footnoteNumbers.length > 0) {
+    let footnoteHtml = '\n\n<!-- wp:html -->\n<div style="font-size: 12px; color: #888; margin-top: 16px; line-height: 1.8;">\n';
+    for (const num of footnoteNumbers) {
+      footnoteHtml += `<p style="margin: 0;">※${num}: ${usedFootnotes[num]}</p>\n`;
+    }
+    footnoteHtml += '</div>\n<!-- /wp:html -->';
+    result += footnoteHtml;
+    fixes.push(`番号注釈リスト追加: ${footnoteNumbers.length}件（※${footnoteNumbers.join(', ※')}）`);
+  }
+
+  return { content: result, fixes: fixes, footnotes: footnoteNumbers };
 }
 
 // ============================================================

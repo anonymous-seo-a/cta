@@ -206,6 +206,9 @@ function runRewriteStep3() {
         Logger.log(`    ポスト処理: ${postResult.fixes.length}件修正`);
         postResult.fixes.forEach(f => Logger.log(`      ${f}`));
       }
+      if (postResult.footnotes.length > 0) {
+        Logger.log(`    番号注釈: ${postResult.footnotes.length}件追加`);
+      }
       saveProcessedSection(ss, targetPostId, j, restored);
       Logger.log(`  [${j}] 完了: ${ms}ms`);
     } else {
