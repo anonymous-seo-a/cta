@@ -179,9 +179,7 @@ function runRewriteStep3() {
     const stepStart = new Date().getTime();
 
     const extracted = extractAnnotationsToPlaceholders(section.content);
-    if (extracted.annotations.length > 0) {
-      Logger.log(`    注釈退避: ${extracted.annotations.length}件`);
-    }
+    // extractAnnotationsToPlaceholders内でログ出力済み
 
     const rewritten = callClaudeSectionRewrite({
       sectionContent: extracted.content,

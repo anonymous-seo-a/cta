@@ -156,40 +156,59 @@ function loadRules(category) {
  * @returns {{ content: string, annotations: string[] }}
  */
 function extractAnnotationsToPlaceholders(content) {
-  const annotations = [];
+  const preserved = [];  // 復元対象（出典リンク、記号定義行）
   let result = content;
+  let removedCount = 0;
 
-  // パターン1: <span style="font-size:...">※...</span>
-  result = result.replace(/<span\s+style="font-size:\s*1[12]px[^"]*">\s*※[^<]+<\/span>/gi, (match) => {
-    const idx = annotations.length;
-    annotations.push(match);
+  // ========== 退避対象（復元する） ==========
+
+  // パターンP1: 出典リンクを含むspan注釈（<a>タグ含有）
+  result = result.replace(/<span\s+style="font-size:\s*1[12]px[^"]*">[^<]*<a\s[^>]*>[^<]*<\/a>[^<]*<\/span>/gi, (match) => {
+    const idx = preserved.length;
+    preserved.push(match);
     return `${ANNOTATION_CONFIG.PLACEHOLDER_PREFIX}${String(idx).padStart(3, '0')}${ANNOTATION_CONFIG.PLACEHOLDER_SUFFIX}`;
   });
 
-  // パターン2: (※a) (※p) (※m) (※ai) (※1) (※2) 等の記号参照
-  result = result.replace(/\(※[a-z0-9]{1,3}\)/gi, (match) => {
-    const idx = annotations.length;
-    annotations.push(match);
+  // パターンP2: <p style="font-size:12px">の出典段落（<a>タグ含有）
+  result = result.replace(/<p\s+style="font-size:\s*1[12]px[^"]*">[^<]*<[^>]*>[^]*?<\/p>/gi, (match) => {
+    if (!/<a\s/i.test(match)) return match; // リンクなし→退避しない
+    const idx = preserved.length;
+    preserved.push(match);
     return `${ANNOTATION_CONFIG.PLACEHOLDER_PREFIX}${String(idx).padStart(3, '0')}${ANNOTATION_CONFIG.PLACEHOLDER_SUFFIX}`;
   });
 
-  // パターン3: ※a: ※p: 等の注釈定義行（スペック表内）
+  // パターンP3: ※a: ※p: 等の注釈定義行（スペック表内の記号定義）
   result = result.replace(/※[a-z]{1,2}[:：][^<\n]+/gi, (match) => {
-    const idx = annotations.length;
-    annotations.push(match);
+    const idx = preserved.length;
+    preserved.push(match);
     return `${ANNOTATION_CONFIG.PLACEHOLDER_PREFIX}${String(idx).padStart(3, '0')}${ANNOTATION_CONFIG.PLACEHOLDER_SUFFIX}`;
   });
 
-  // パターン4: 段落内の※で始まるインライン注釈（句点・改行・タグまで）
+  // ========== 除去対象（復元しない、postProcessで再挿入） ==========
+
+  // パターンR1: 商材インライン注釈 <span style="font-size:...">※...</span>（出典リンクは上で退避済み）
+  result = result.replace(/<span\s+style="font-size:\s*1[12]px[^"]*">\s*※[^<]+<\/span>/gi, (match) => {
+    removedCount++;
+    return '';
+  });
+
+  // パターンR2: (※a) (※p) (※m) (※ai) 等の記号参照
+  result = result.replace(/\(※[a-z]{1,3}\)/gi, (match) => {
+    removedCount++;
+    return '';
+  });
+
+  // パターンR3: 段落内の※で始まるインライン注釈（出典・プレースホルダー以外）
   result = result.replace(/(?<!\[KEEP_ANNOTATION_\d{3})※[^<\n\[]{5,}/g, (match) => {
-    // プレースホルダー自体を置換しないようガード
     if (match.includes(ANNOTATION_CONFIG.PLACEHOLDER_PREFIX)) return match;
-    const idx = annotations.length;
-    annotations.push(match);
-    return `${ANNOTATION_CONFIG.PLACEHOLDER_PREFIX}${String(idx).padStart(3, '0')}${ANNOTATION_CONFIG.PLACEHOLDER_SUFFIX}`;
+    // 出典（「出典」「参考」を含む）は除去しない
+    if (/出典|参考|引用/.test(match)) return match;
+    removedCount++;
+    return '';
   });
 
-  return { content: result, annotations: annotations };
+  Logger.log(`    注釈処理: ${preserved.length}件退避（出典等）, ${removedCount}件除去（商材注釈）`);
+  return { content: result, annotations: preserved };
 }
 
 /**
@@ -353,7 +372,6 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
   const mustRules = rules.filter(r => r.ruleType === '必須表現' || r.ruleType === '正式表記');
   for (const rule of mustRules) {
     if (!result.includes(rule.ngText)) continue;
-    // 商材言及チェック
     if (rule.condition === '商材言及時') {
       const relevantProducts = rule.productIds.includes('ALL')
         ? annotations.map(a => a.productName)
@@ -370,14 +388,8 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
     }
   }
 
-  // 2.5. Claude APIが挿入した注釈を除去（修正B対応）
-  // ポスト処理側で統一的に管理するため、Claude APIが勝手に挿入した注釈を一旦除去
-  // ただし [KEEP_ANNOTATION_xxx] プレースホルダーは保持（既に復元済みのはず）
-  // (※X) 形式で元のコンテンツになかった新規挿入分を除去するのは難しいため、
-  // 二重挿入防止はステップ3の注釈チェックで対応する
-
-  // 3. 注釈の存在チェック（商材言及時）
-  // 各商材名がコンテンツに存在するか確認
+  // 3. 商材注釈を全トリガーKW出現箇所に挿入
+  // （extractAnnotationsToPlaceholdersで既存注釈は全て除去済み）
   const productNames = [...new Set(annotations.map(a => a.productName))];
 
   // 3a. セクション内で言及されている商材数をカウント（まとめ段落検出用）
@@ -396,51 +408,63 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
       const triggerFound = ann.triggerKws.some(kw => result.includes(kw));
       if (!triggerFound) continue;
 
-      // 既に注釈が存在するか
-      const hasSymbolRef = ann.symbol && result.includes(`(${ann.symbol})`);
-      const hasInlineAnnotation = result.includes(ann.annotationText);
-
-      if (hasSymbolRef || hasInlineAnnotation) continue; // 既にある
-
       // 複数商材言及セクションでは個別注釈を自動挿入しない
-      // 個別商材セクション（スペック表付き）のみで注釈を挿入する
       if (isMultiProductSection) continue;
 
-      // 注釈が不足 → 補完
+      // 注釈テキストを決定
+      let insertText;
+      if (symbolMap[ann.symbol]) {
+        insertText = `(${ann.symbol})`;
+      } else {
+        insertText = `<span style="font-size:12px!important; color:#888!important;">※${ann.annotationText}</span>`;
+      }
+
+      // 全てのトリガーKW出現箇所に注釈を挿入（後方から処理してインデックスずれを防止）
+      let inserted = false;
       for (const kw of ann.triggerKws) {
         if (!result.includes(kw)) continue;
 
-        // トリガーKWを含む段落を特定し、その段落に3社以上の商材名があればスキップ
-        const kwIndex = result.indexOf(kw);
-        const pStart = result.lastIndexOf('<p>', kwIndex);
-        const pEnd = result.indexOf('</p>', kwIndex);
-        if (pStart >= 0 && pEnd >= 0) {
-          const paragraph = result.substring(pStart, pEnd);
-          const productsInParagraph = productNames.filter(name => paragraph.includes(name));
-          if (productsInParagraph.length >= 3) {
-            fixes.push(`注釈スキップ: 「${kw}」（段落内に${productsInParagraph.length}社言及のためスキップ）`);
-            continue;
+        // KWの全出現位置を収集（後方から処理するために逆順）
+        const positions = [];
+        let searchFrom = 0;
+        while (true) {
+          const idx = result.indexOf(kw, searchFrom);
+          if (idx === -1) break;
+          positions.push(idx);
+          searchFrom = idx + kw.length;
+        }
+        positions.reverse(); // 後方から処理
+
+        for (const kwIndex of positions) {
+          const afterKw = kwIndex + kw.length;
+
+          // 段落レベルで3社以上言及をチェック
+          const pStart = result.lastIndexOf('<p>', kwIndex);
+          const pEnd = result.indexOf('</p>', kwIndex);
+          if (pStart >= 0 && pEnd >= 0) {
+            const paragraph = result.substring(pStart, pEnd);
+            const productsInParagraph = productNames.filter(name => paragraph.includes(name));
+            if (productsInParagraph.length >= 3) continue;
           }
+
+          // 直後に既に注釈がないか確認
+          const afterText = result.substring(afterKw, afterKw + 30);
+          if (afterText.startsWith('(※') || afterText.startsWith('<span style="font-size:1')) continue;
+
+          // HTMLタグの中にあるKW出現はスキップ（href属性やalt属性内など）
+          const beforeKw = result.substring(Math.max(0, kwIndex - 200), kwIndex);
+          const lastOpenTag = beforeKw.lastIndexOf('<');
+          const lastCloseTag = beforeKw.lastIndexOf('>');
+          if (lastOpenTag > lastCloseTag) continue; // タグの中にいる
+
+          result = result.substring(0, afterKw) + insertText + result.substring(afterKw);
+          inserted = true;
         }
 
-        const afterKw = kwIndex + kw.length;
-
-        // 既にこの位置の直後に注釈やプレースホルダーがないか
-        const afterText = result.substring(afterKw, afterKw + 20);
-        if (afterText.startsWith('(※') || afterText.startsWith('[KEEP_ANNOTATION_')) continue;
-
-        let insertText;
-        if (symbolMap[ann.symbol]) {
-          // スペック表に記号定義あり → 記号参照
-          insertText = `(${ann.symbol})`;
-        } else {
-          // インライン注釈
-          insertText = `<span style="font-size:12px!important; color:#888!important;">※${ann.annotationText}</span>`;
+        if (inserted) {
+          fixes.push(`注釈挿入: 「${kw}」(${positions.length}箇所)の後に${symbolMap[ann.symbol] ? ann.symbol + '記号' : 'インライン注釈'}を挿入`);
+          break; // このannotationの処理完了（別のトリガーKWは不要）
         }
-
-        result = result.substring(0, afterKw) + insertText + result.substring(afterKw);
-        fixes.push(`注釈補完: 「${kw}」の後に${symbolMap[ann.symbol] ? ann.symbol + '記号' : 'インライン注釈'}を挿入`);
-        break; // 1トリガーにつき1箇所補完（全箇所は次の走査で）
       }
     }
   }
