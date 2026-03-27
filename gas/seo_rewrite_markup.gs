@@ -153,18 +153,15 @@ function runRewriteStep3() {
       continue;
     }
 
-    // 再利用ブロック・CTAブロックを含むセクションは設計書の指示に関わらず強制維持
-    if (section.hasReusable || section.hasCta) {
-      Logger.log(`  [${j}] 強制維持（再利用/CTAブロック保護）: ${section.heading || '(冒頭)'}`);
-      saveProcessedSection(ss, targetPostId, j, section.content);
-      newCompletions++;
-      continue;
-    }
-
-    // 削除（再利用/CTAブロック含有セクションは上の強制維持で除外済み）
-    if (sectionDesign && sectionDesign.action === '削除') {
-      Logger.log(`  [${j}] 削除: ${section.heading}`);
-      saveProcessedSection(ss, targetPostId, j, '');
+    // 削除・統合（再利用/CTAブロック含有セクションは削除禁止→維持に強制変更）
+    if (sectionDesign && (sectionDesign.action === '削除' || sectionDesign.action === '統合')) {
+      if (section.hasReusable || section.hasCta) {
+        Logger.log(`  [${j}] ${sectionDesign.action}→維持に変更（再利用/CTAブロック保護）: ${section.heading}`);
+        saveProcessedSection(ss, targetPostId, j, section.content);
+      } else {
+        Logger.log(`  [${j}] ${sectionDesign.action}: ${section.heading}`);
+        saveProcessedSection(ss, targetPostId, j, '');
+      }
       newCompletions++;
       continue;
     }
