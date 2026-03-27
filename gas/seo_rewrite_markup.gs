@@ -153,11 +153,15 @@ function runRewriteStep3() {
       continue;
     }
 
-    // 削除
+    // 削除（再利用ブロック・CTAブロックを含むセクションは削除禁止→維持に強制変更）
     if (sectionDesign && sectionDesign.action === '削除') {
-      Logger.log(`  [${j}] 削除: ${section.heading}`);
-      const preserved = extractPreservedBlocks(section.content);
-      saveProcessedSection(ss, targetPostId, j, preserved || '');
+      if (section.hasReusable || section.hasCta) {
+        Logger.log(`  [${j}] 削除→維持に変更（再利用/CTAブロック保護）: ${section.heading}`);
+        saveProcessedSection(ss, targetPostId, j, section.content);
+      } else {
+        Logger.log(`  [${j}] 削除: ${section.heading}`);
+        saveProcessedSection(ss, targetPostId, j, '');
+      }
       newCompletions++;
       continue;
     }
@@ -190,6 +194,8 @@ function runRewriteStep3() {
       humanNotes: humanNotes,
       keyword: targetKeyword,
       annotationPromptText: annotationPromptText,
+      hasReusable: section.hasReusable,
+      hasCta: section.hasCta,
     });
 
     const ms = new Date().getTime() - stepStart;
@@ -622,6 +628,14 @@ function buildSectionRewriteSystemPrompt() {
 5. 景品表示法・金融商品取引法に抵触する表現は使用しない
 6. 古い情報は最新の情報に更新する。ただし確信がない数値・日付は「※最新情報をご確認ください」と注記する
 7. 商材（金融サービス）のスペック数値（金利・限度額・審査時間等）は変更しないこと。不明な場合は元の表記を維持する
+8. 見出しタグ（h2, h3）に既存のid属性がある場合、そのid属性を必ず保持すること。例: <h3 class="wp-block-heading" id="id06"> → idを維持
+
+## 注釈に関する絶対ルール
+- 注釈（※で始まるテキスト）は自分で挿入しないこと。注釈はポスト処理で自動挿入される
+- [KEEP_ANNOTATION_xxx] プレースホルダーのみそのまま保持すること
+- (※a) (※p) (※m) (※ai) 等の記号参照は、元のコンテンツに存在する場合のみそのまま保持すること。新規に追加しないこと
+- <span style="font-size:12px...">※...</span> 形式の注釈も、元のコンテンツに存在する場合のみそのまま保持すること。新規に追加しないこと
+- 禁止表現（「審査が甘い」等）を使わないことだけ意識すればよい。注釈の挿入は一切不要
 
 ## コンテンツルール
 - ペルソナの不安・疑問に直接答える内容にすること
@@ -635,14 +649,16 @@ function buildSectionRewriteSystemPrompt() {
 <!-- /wp:heading -->
 
 <!-- wp:heading {"level":3} -->
-<h3 class="wp-block-heading">H3</h3>
+<h3 class="wp-block-heading" id="既存のidがあれば保持">H3</h3>
 <!-- /wp:heading -->
 
 <!-- wp:paragraph -->
 <p>テキスト</p>
 <!-- /wp:paragraph -->
 
-ボックス: <div class="box-004">注意</div> / <div class="box-006">補足</div> / <div class="box-008">ポイント</div>
+ボックス: <div class="box-004">注意テキスト</div> / <div class="box-006">補足テキスト</div> / <div class="box-008">ポイントテキスト</div>
+
+重要: ボックス（box-004, box-006, box-008）内には<p>タグ1つだけを入れること。<ul>や<li>は入れてはいけない。リスト表示が必要な場合は、ボックスの外側でwp:listブロックを使うこと。
 
 強調: <strong><mark class="has-inline-color has-gold-color" style="background-color:rgba(0, 0, 0, 0)">テキスト</mark></strong>
 
@@ -699,10 +715,22 @@ ${sd.instructions}`;
 
   const notesText = params.humanNotes ? `【人間の追加指示】\n${params.humanNotes}` : '';
 
+  // 再利用ブロック・CTA保護の注意喚起
+  let protectionText = '';
+  if (params.hasReusable || params.hasCta) {
+    protectionText = `【重要：保護ブロックあり】
+このセクションには${params.hasReusable ? '再利用ブロック（<!-- wp:block {"ref":数字} /-->）' : ''}${params.hasReusable && params.hasCta ? 'と' : ''}${params.hasCta ? 'CTAブロック（<!-- wp:soico-cta/ で始まるもの）' : ''}が含まれています。
+これらのブロックとその前後の文脈（商品紹介文、見出し）は一字一句変更せず、元の位置にそのまま出力してください。
+このセクションを統合・削除する指示があっても、保護ブロックとその文脈は必ず維持すること。`;
+  }
+
   return `セクションをリライトしてください。Gutenbergブロックマークアップのみを出力。
+※注釈（※テキスト）は自分で挿入しないこと。ポスト処理で自動挿入されます。
+※見出しの既存id属性は必ず保持すること。
 
 KW: ${params.keyword} / セクション: ${params.sectionIndex + 1}/${params.totalSections}
 
+${protectionText}
 ${personaText}
 ${intentText}
 ${instructionText}

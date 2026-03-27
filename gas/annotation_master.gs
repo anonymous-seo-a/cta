@@ -291,51 +291,29 @@ function buildAnnotationPromptText(category, symbolMap) {
 
   if (annotations.length === 0 && rules.length === 0) return '';
 
-  let text = '\n\n## 必須注釈ルール（絶対遵守）\n\n';
+  let text = '\n\n## 金融レギュレーション遵守ルール\n\n';
 
-  // 記号定義の状態
-  const symbolKeys = Object.keys(symbolMap);
-  if (symbolKeys.length > 0) {
-    text += `この記事にはスペック表パターンブロックに以下の記号定義が存在します: ${symbolKeys.join(', ')}\n`;
-    text += `これらの記号が定義済みの場合、本文では (${symbolKeys[0]}) のように記号参照のみで注釈を表示します。\n\n`;
-  }
+  text += '### 重要: 注釈は自分で挿入しないこと\n';
+  text += '※で始まる注釈テキスト、(※a)(※p)等の記号参照は、ポスト処理で自動挿入されます。\n';
+  text += 'あなたは注釈を一切挿入しないでください。既存の [KEEP_ANNOTATION_xxx] プレースホルダーだけ保持してください。\n\n';
 
-  // 注釈一覧
-  text += '### 商材別必須注釈\n';
-  text += '以下のトリガーKWが商材への言及として出現するたびに、対応する注釈を付与してください。\n';
-  text += '商材に言及していない文脈（一般論等）では注釈不要です。\n\n';
-
-  const byProduct = {};
-  annotations.forEach(a => {
-    if (!byProduct[a.productName]) byProduct[a.productName] = [];
-    byProduct[a.productName].push(a);
-  });
-
-  for (const [name, items] of Object.entries(byProduct)) {
-    text += `【${name}】\n`;
-    items.forEach(a => {
-      const kwStr = a.triggerKws.join(' / ');
-      const symbolNote = symbolMap[a.symbol] ? `→ ${a.symbol} 記号参照で表記` : `→ インライン注釈`;
-      text += `- "${kwStr}" 言及時: ※${a.annotationText} ${symbolNote}\n`;
-    });
-    text += '\n';
-  }
-
-  // 禁止表現・必須表現
+  // 禁止表現（これだけはClaude APIが守る必要がある）
   const ngRules = rules.filter(r => r.ruleType === '禁止表現');
-  const mustRules = rules.filter(r => r.ruleType === '必須表現' || r.ruleType === '正式表記');
-
   if (ngRules.length > 0) {
     text += '### 絶対NG表現（使用禁止）\n';
+    text += 'これらの表現は絶対に使用しないでください。\n';
     ngRules.forEach(r => { text += `- ✕「${r.ngText}」\n`; });
     text += '\n';
   }
 
+  // 必須表現（正しい表現への置換 — これもClaude APIが守る）
+  const mustRules = rules.filter(r => r.ruleType === '必須表現' || r.ruleType === '正式表記');
   if (mustRules.length > 0) {
-    text += '### 必須表現（正しい表現に置換）\n';
+    text += '### 正しい表現ルール\n';
+    text += '以下の左側の表現が出現する場合、右側の正しい表現に置き換えてください。\n';
     mustRules.forEach(r => {
       const scope = r.productIds.includes('ALL') ? '全社' : r.productIds.join('/');
-      text += `- ✕「${r.ngText}」→ ○「${r.correctText}」（${scope}、${r.condition}）\n`;
+      text += `- ✕「${r.ngText}」→ ○「${r.correctText}」（${scope}）\n`;
     });
     text += '\n';
   }
@@ -392,9 +370,23 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
     }
   }
 
+  // 2.5. Claude APIが挿入した注釈を除去（修正B対応）
+  // ポスト処理側で統一的に管理するため、Claude APIが勝手に挿入した注釈を一旦除去
+  // ただし [KEEP_ANNOTATION_xxx] プレースホルダーは保持（既に復元済みのはず）
+  // (※X) 形式で元のコンテンツになかった新規挿入分を除去するのは難しいため、
+  // 二重挿入防止はステップ3の注釈チェックで対応する
+
   // 3. 注釈の存在チェック（商材言及時）
   // 各商材名がコンテンツに存在するか確認
   const productNames = [...new Set(annotations.map(a => a.productName))];
+
+  // 3a. セクション内で言及されている商材数をカウント（まとめ段落検出用）
+  const mentionedProducts = productNames.filter(name => result.includes(name));
+  const isMultiProductSection = mentionedProducts.length >= 3;
+  if (isMultiProductSection) {
+    fixes.push(`複数商材言及セクション（${mentionedProducts.length}社）: 個別注釈の自動挿入をスキップ`);
+  }
+
   for (const productName of productNames) {
     if (!result.includes(productName)) continue;
 
@@ -407,16 +399,30 @@ function postProcessAnnotations(content, annotations, symbolMap, rules) {
       // 既に注釈が存在するか
       const hasSymbolRef = ann.symbol && result.includes(`(${ann.symbol})`);
       const hasInlineAnnotation = result.includes(ann.annotationText);
-      const hasPlaceholderAnnotation = /\[KEEP_ANNOTATION_\d{3}\]/.test(result); // 既にプレースホルダーがある
 
       if (hasSymbolRef || hasInlineAnnotation) continue; // 既にある
+
+      // 複数商材言及セクションでは個別注釈を自動挿入しない
+      // 個別商材セクション（スペック表付き）のみで注釈を挿入する
+      if (isMultiProductSection) continue;
 
       // 注釈が不足 → 補完
       for (const kw of ann.triggerKws) {
         if (!result.includes(kw)) continue;
 
-        // 最初の出現箇所に注釈を挿入
+        // トリガーKWを含む段落を特定し、その段落に3社以上の商材名があればスキップ
         const kwIndex = result.indexOf(kw);
+        const pStart = result.lastIndexOf('<p>', kwIndex);
+        const pEnd = result.indexOf('</p>', kwIndex);
+        if (pStart >= 0 && pEnd >= 0) {
+          const paragraph = result.substring(pStart, pEnd);
+          const productsInParagraph = productNames.filter(name => paragraph.includes(name));
+          if (productsInParagraph.length >= 3) {
+            fixes.push(`注釈スキップ: 「${kw}」（段落内に${productsInParagraph.length}社言及のためスキップ）`);
+            continue;
+          }
+        }
+
         const afterKw = kwIndex + kw.length;
 
         // 既にこの位置の直後に注釈やプレースホルダーがないか
