@@ -11,5 +11,8 @@ Thumbs.db
 .vscode/
 .idea/
 
+# clasp認証（通常 ~/ にあるが念のため）
+.clasprc.json
+
 # Node
 node_modules/
