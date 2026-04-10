@@ -43,6 +43,9 @@ export const api = {
   removeCta: (postId, { partner, featureText, sectionHeading, occurrence }) =>
     request('/api/audit/remove-cta', { method: 'POST', body: JSON.stringify({ postId, partner, featureText, sectionHeading, occurrence }) }),
 
+  removeAllDuplicates: (duplicates) =>
+    request('/api/audit/remove-all-duplicates', { method: 'POST', body: JSON.stringify({ duplicates }) }),
+
   getAllPartners: () => request('/api/partners'),
 
   updatePartner: (category, slug, data) =>

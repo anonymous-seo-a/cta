@@ -338,7 +338,22 @@ function AuditView({ showToast }) {
   const [duplicates, setDuplicates] = useState([]);
   const [totalRemovable, setTotalRemovable] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [scanned, setScanned] = useState(false);
+
+  const handleRemoveAll = async () => {
+    if (!confirm(`重複CTA ${totalRemovable}件を全て削除しますか？（各記事のバックアップは自動保存されます）`)) return;
+    setRemoving(true);
+    try {
+      const result = await api.removeAllDuplicates(duplicates);
+      showToast(`${result.removed}件の重複CTAを削除しました${result.errors?.length ? `（${result.errors.length}件エラー）` : ''}`);
+      // 再スキャンして残りを確認
+      await handleScan();
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setRemoving(false);
+  };
 
   const handleScan = async () => {
     setLoading(true);
@@ -396,9 +411,14 @@ function AuditView({ showToast }) {
   return (
     <div>
       <div style={{ marginBottom: 16, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button className="btn-apply" onClick={handleScan} disabled={loading}>
+        <button className="btn-apply" onClick={handleScan} disabled={loading || removing}>
           {loading ? 'スキャン中...' : '重複CTAスキャン'}
         </button>
+        {scanned && totalRemovable > 0 && (
+          <button className="btn-reject" onClick={handleRemoveAll} disabled={loading || removing}>
+            {removing ? '削除中...' : `重複${totalRemovable}件を全て削除`}
+          </button>
+        )}
         {scanned && <span style={{ fontSize: 14, color: '#888' }}>
           {Object.keys(grouped).length}記事 / {duplicates.length}セクション / {totalRemovable}件の重複
         </span>}

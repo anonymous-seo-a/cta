@@ -669,6 +669,140 @@ app.post('/api/audit/remove-cta', async (req, res) => {
   }
 });
 
+// CTA除外: 検出した重複を全て一括削除
+app.post('/api/audit/remove-all-duplicates', async (req, res) => {
+  const { duplicates } = req.body; // フロントから渡される重複一覧
+  if (!duplicates || duplicates.length === 0) return res.json({ removed: 0 });
+
+  const auth = Buffer.from(`${config.wp.username}:${config.wp.appPassword}`).toString('base64');
+  let totalRemoved = 0;
+  const errors = [];
+
+  // 記事単位でグルーピング（1記事につき1回だけWP取得・更新する）
+  const byPost = {};
+  for (const dup of duplicates) {
+    for (const block of (dup.ctaBlocks || [])) {
+      if (block.action !== 'remove') continue;
+      if (!byPost[dup.postId]) byPost[dup.postId] = { title: dup.title, url: dup.url, sections: [] };
+      byPost[dup.postId].sections.push({ heading: dup.heading, level: dup.level, block });
+    }
+  }
+
+  for (const [postId, info] of Object.entries(byPost)) {
+    try {
+      const getRes = await fetch(`${config.wp.restBase}/posts/${postId}?context=edit`, {
+        headers: { 'Authorization': `Basic ${auth}` },
+      });
+      if (!getRes.ok) { errors.push({ postId, error: `GET ${getRes.status}` }); continue; }
+
+      const postData = await getRes.json();
+      let content = postData.content.raw;
+
+      // バックアップ
+      await store.saveBackup(postId, content);
+
+      // H2+H3 見出しを全抽出（Gutenberg + 生HTML混在対応）
+      const headings = extractAllHeadingsFromContent(content);
+
+      let removedInPost = 0;
+
+      // セクションごとに処理（後ろのセクションから処理してインデックスずれを防ぐ）
+      const sortedSections = [...info.sections].sort((a, b) => {
+        const idxA = headings.findIndex(h => h.text === a.heading || h.text.includes(a.heading) || a.heading.includes(h.text));
+        const idxB = headings.findIndex(h => h.text === b.heading || h.text.includes(b.heading) || b.heading.includes(h.text));
+        return idxB - idxA; // 後ろのセクションを先に処理
+      });
+
+      for (const sec of sortedSections) {
+        const targetIdx = headings.findIndex(h =>
+          h.text === sec.heading || h.text.includes(sec.heading) || sec.heading.includes(h.text)
+        );
+        if (targetIdx === -1) continue;
+
+        const targetLevel = headings[targetIdx].level;
+        const sectionStart = headings[targetIdx].end;
+        let sectionEnd = content.length;
+        for (let i = targetIdx + 1; i < headings.length; i++) {
+          if (headings[i].level <= targetLevel) { sectionEnd = headings[i].start; break; }
+        }
+        const sectionContent = content.substring(sectionStart, sectionEnd);
+
+        // セクション内で同じ blockType+partner の2番目を見つけて削除
+        const ctaRegex = /<!-- wp:soico-cta\/[a-z-]+\s+\{[^}]*\}\s*\/-->/g;
+        const matches = [];
+        let cm;
+        while ((cm = ctaRegex.exec(sectionContent)) !== null) {
+          const hasPartner = cm[0].includes(`"${sec.block.partner}"`);
+          const hasBlockType = cm[0].includes(`soico-cta/${sec.block.blockType}`);
+          if (hasPartner && hasBlockType) {
+            matches.push({ globalIndex: sectionStart + cm.index, length: cm[0].length });
+          }
+        }
+
+        // 2番目以降を削除（後ろから）
+        if (matches.length >= 2) {
+          const target = matches[matches.length - 1]; // 最後のマッチ（=重複側）
+          let removeStart = target.globalIndex;
+          let removeEnd = target.globalIndex + target.length;
+          while (removeStart > 0 && content[removeStart - 1] === '\n') removeStart--;
+          while (removeEnd < content.length && content[removeEnd] === '\n') removeEnd++;
+          content = content.substring(0, removeStart) + content.substring(removeEnd);
+          removedInPost++;
+
+          // headings の位置が変わるので再抽出
+          headings.length = 0;
+          headings.push(...extractAllHeadingsFromContent(content));
+        }
+      }
+
+      if (removedInPost > 0) {
+        const putRes = await fetch(`${config.wp.restBase}/posts/${postId}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+        });
+        if (putRes.ok) {
+          totalRemoved += removedInPost;
+          await store.addHistoryEntry({
+            postId, title: info.title, url: info.url,
+            action: 'bulk-remove-duplicates',
+            removedCount: removedInPost,
+          });
+        } else {
+          errors.push({ postId, error: `POST ${putRes.status}` });
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 500));
+    } catch (e) {
+      errors.push({ postId, error: e.message });
+    }
+  }
+
+  res.json({ removed: totalRemoved, errors });
+});
+
+// 共通: コンテンツからH2+H3見出しを全抽出（Gutenberg+生HTML混在対応）
+function extractAllHeadingsFromContent(content) {
+  const headings = [];
+  let hm;
+  const gutenbergRegex = /<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h([23])[^>]*>([\s\S]*?)<\/h\1>\s*<!-- \/wp:heading -->/gi;
+  const gutenbergPositions = new Set();
+  while ((hm = gutenbergRegex.exec(content)) !== null) {
+    headings.push({ text: hm[2].replace(/<[^>]+>/g, '').trim(), level: parseInt(hm[1]), start: hm.index, end: hm.index + hm[0].length });
+    const innerH = /<h[23]/gi;
+    let ih;
+    while ((ih = innerH.exec(hm[0])) !== null) gutenbergPositions.add(hm.index + ih.index);
+  }
+  const rawRegex = /<h([23])[^>]*>([\s\S]*?)<\/h\1>/gi;
+  while ((hm = rawRegex.exec(content)) !== null) {
+    if (gutenbergPositions.has(hm.index)) continue;
+    headings.push({ text: hm[2].replace(/<[^>]+>/g, '').trim(), level: parseInt(hm[1]), start: hm.index, end: hm.index + hm[0].length });
+  }
+  headings.sort((a, b) => a.start - b.start);
+  return headings;
+}
+
 // Partner DB — CRUD
 app.get('/api/partners', async (req, res) => {
   const db = await loadPartnerDB();
