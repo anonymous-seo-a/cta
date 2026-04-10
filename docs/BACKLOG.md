@@ -7,8 +7,13 @@
 ## NOW（次のセッションでやるべき）
 
 ### CTA挿入強化（feature/cta-plugin-update）
-- [x] **Phase A**: `buildCtaBlockComment` に `version: "2"` 付与（B-lazy方式：URL解決はプラグイン会社データ層に委譲）
-- [ ] **Phase A 動作確認**: `clasp push` → 既存承認フローで記事1〜2本に挿入 → V2デザインで描画されることをWPフロントで確認
+- [x] **Phase A**: `buildCtaBlockComment` に `version: "2"` 付与 + S1-S3（挿入位置増加施策）
+- [x] **Phase A 動作確認**: V2デザイン描画OK
+- [x] **Phase A2**: CTA Gap Fill 機能（CTA空白セクション自動検出 + Claude intent判定 + ラウンドロビン配分）
+  - `clasp/cta_gap_fill.js` 新規作成
+  - `prompts/gap_fill_prompt.md` 新規作成
+  - PARTNER_SLUG_MAP に不足slug追加、applyApprovedInsertions をシート名パラメータ化
+- [ ] **Phase A2 動作確認**: `testGapFill()` で3記事テスト → `cta_gap_fill_plan` シート確認 → 承認 → 反映
 - [ ] **Phase B**: `cta_diagnosis_master` シート新設（永続台帳。全2000記事 × PV閾値30 × snapshot差分検出）
   - `clasp/cta_diagnosis_master.js` 新規作成
   - `clasp/main.js` に `runWeeklyScoring()` 追加、`TOP_N_ARTICLES` 撤廃
@@ -36,6 +41,8 @@
 ### CTA挿入拡張
 - [ ] **Phase E**: 結論ボックス・比較表ブロック対応（CVR診断プロンプト改修＋block builder拡張が必要、独立タスク）
 - [ ] CVR診断プロンプトに「ブロック種別判定（inline/conclusion/comparison）」を追加
+- [ ] soico-securities-cta に `/wp-json/soico-cta/v1/priorities` REST endpoint 追加（Gap Fill の partner 優先順位を動的取得）
+- [ ] Microsoft Clarity 連携（ヒートマップ/スクロールデータを Gap Fill の intent 判定に注入、精度向上）
 
 ### SEOリライト拡張
 - [ ] FXカテゴリのリライト対応
@@ -68,6 +75,8 @@
 
 ## DONE（完了済み。月1回アーカイブ）
 
+- [x] Phase A2: CTA Gap Fill 機能（Claude intent判定 + ラウンドロビン配分）(2026-04-10)
+- [x] Phase A + S1-S3: V2対応 + 挿入位置増加施策 (2026-04-10)
 - [x] Phase A: `buildCtaBlockComment` に `version: "2"` 付与（B-lazy方式） (2026-04-10)
 - [x] clasp環境構築完了 + GASファイルを clasp/ に移行 (2026-04-01, 6c65895)
 - [x] 注釈処理 セクション単位→全文一括処理に変更 (2026-03-27, 1c7ead6)

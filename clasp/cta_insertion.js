@@ -8,20 +8,23 @@ const PARTNER_SLUG_MAP = {
   'acom': 'acom', 'acom_checked': 'acom',
   'aiful': 'aiful', 'aiful_checked': 'aiful',
   'mobit': 'mobit', 'mobit_checked': 'mobit',
+  'lakealsa': 'lakealsa', 'smbcmobit': 'smbcmobit',
   'plannel': 'plannel', 'excel': 'excel',
   'big': 'big', 'alcosystem': 'alcosystem',
   'spirits': 'spirits', 'progress': 'progress',
   'au-pay-smart-loan': 'au_pay',
   // 暗号資産
   'bitflyer': 'bitflyer', 'bitflyer_checked': 'bitflyer',
-  'coincheck': 'coincheck', 'gmo-coin': 'gmo_coin',
-  'bitbank': 'bitbank', 'sbivc-trade': 'sbi_vc',
+  'coincheck': 'coincheck', 'gmo-coin': 'gmo_coin', 'gmo_coin': 'gmo_coin',
+  'bitbank': 'bitbank', 'sbivc-trade': 'sbi_vc', 'sbi_vc': 'sbi_vc',
   'bittrade': 'bittrade', 'binance-japan': 'binance_japan',
   'bitpoint': 'bitpoint', 'zaif': 'zaif', 'okj': 'okj',
   'rakuten-wallet': 'rakuten_wallet', 'line-bitmax': 'line_bitmax',
   'sblox': 'sblox',
   // 証券
   'sbi': 'sbi', 'rakuten': 'rakuten', 'gaia-btm': 'gaia',
+  'monex': 'monex', 'matsui': 'matsui', 'moomoo': 'moomoo',
+  'okasan': 'okasan', 'mufjesmart': 'mufjesmart',
   'alternabank': 'alternabank', 'agcrowd': 'agcrowd',
   'funds': 'funds', 'crowdbank': 'crowdbank', 'lendex': 'lendex',
 };
@@ -173,13 +176,18 @@ function generateCtaInsertionPlan() {
 
 // ============================================================
 // 承認済みの変更をWordPressに反映
+// シート名を指定可能（Gap Fill 等からの共用）
 // ============================================================
 function applyApprovedInsertions() {
+  applyApprovedInsertionsFromSheet('cta_insertion_plan');
+}
+
+function applyApprovedInsertionsFromSheet(sheetName) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('cta_insertion_plan');
+  const sheet = ss.getSheetByName(sheetName);
 
   if (!sheet) {
-    Logger.log('cta_insertion_planシートが見つかりません。');
+    Logger.log(`${sheetName}シートが見つかりません。`);
     return;
   }
 
