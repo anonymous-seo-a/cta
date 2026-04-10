@@ -17,17 +17,29 @@ app.use(express.static(path.join(__dirname, 'client/dist')));
 const Anthropic = require('@anthropic-ai/sdk');
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 
+const BATCH_SIZE = 50;
+
 async function fetchArticlesFromPHP(postIds) {
-  const params = new URLSearchParams({ token: config.site.phpToken });
   if (postIds && postIds.length > 0) {
-    params.set('post_ids', postIds.join(','));
-  } else {
-    params.set('limit', '9999');
+    const params = new URLSearchParams({ token: config.site.phpToken, post_ids: postIds.join(',') });
+    const res = await fetch(`${config.site.url}/gap_fill_prepare.php?${params}`);
+    if (!res.ok) throw new Error(`PHP: HTTP ${res.status}`);
+    return (await res.json()).posts;
   }
-  const url = `${config.site.url}/gap_fill_prepare.php?${params}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`PHP: HTTP ${res.status}`);
-  return (await res.json()).posts;
+
+  const allPosts = [];
+  let offset = 0;
+  while (true) {
+    const params = new URLSearchParams({ token: config.site.phpToken, limit: String(BATCH_SIZE), offset: String(offset) });
+    const res = await fetch(`${config.site.url}/gap_fill_prepare.php?${params}`);
+    if (!res.ok) throw new Error(`PHP: HTTP ${res.status} (offset=${offset})`);
+    const data = await res.json();
+    if (!data.posts || data.posts.length === 0) break;
+    allPosts.push(...data.posts);
+    if (data.posts.length < BATCH_SIZE) break;
+    offset += BATCH_SIZE;
+  }
+  return allPosts;
 }
 
 async function loadPartnerDB() {

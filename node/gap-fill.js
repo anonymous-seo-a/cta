@@ -6,25 +6,44 @@ const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 // ============================================================
 // PHP エンドポイントから記事データを一括取得
 // ============================================================
+const BATCH_SIZE = 50;
+
 async function fetchArticlesFromPHP(postIds) {
-  const params = new URLSearchParams({ token: config.site.phpToken });
-
   if (postIds && postIds.length > 0) {
-    params.set('post_ids', postIds.join(','));
-  } else {
-    params.set('limit', '9999');
+    // 指定IDの場合は1リクエスト（少量なのでOK）
+    const params = new URLSearchParams({ token: config.site.phpToken, post_ids: postIds.join(',') });
+    const res = await fetch(`${config.site.url}/gap_fill_prepare.php?${params}`);
+    if (!res.ok) throw new Error(`gap_fill_prepare.php: HTTP ${res.status}`);
+    const data = await res.json();
+    console.log(`PHP前処理: ${data.total}件取得`);
+    return data.posts;
   }
 
-  const url = `${config.site.url}/gap_fill_prepare.php?${params}`;
-  const res = await fetch(url);
+  // 全件取得: バッチ方式（PHPメモリ制限回避）
+  const allPosts = [];
+  let offset = 0;
 
-  if (!res.ok) {
-    throw new Error(`gap_fill_prepare.php: HTTP ${res.status}`);
+  while (true) {
+    const params = new URLSearchParams({
+      token: config.site.phpToken,
+      limit: String(BATCH_SIZE),
+      offset: String(offset),
+    });
+    const res = await fetch(`${config.site.url}/gap_fill_prepare.php?${params}`);
+    if (!res.ok) throw new Error(`gap_fill_prepare.php: HTTP ${res.status} (offset=${offset})`);
+
+    const data = await res.json();
+    if (!data.posts || data.posts.length === 0) break;
+
+    allPosts.push(...data.posts);
+    console.log(`PHP前処理: ${allPosts.length}件取得済み (batch ${offset / BATCH_SIZE + 1})`);
+
+    if (data.posts.length < BATCH_SIZE) break;
+    offset += BATCH_SIZE;
   }
 
-  const data = await res.json();
-  console.log(`PHP前処理: ${data.total}件取得`);
-  return data.posts;
+  console.log(`PHP前処理 完了: 合計${allPosts.length}件`);
+  return allPosts;
 }
 
 // ============================================================
