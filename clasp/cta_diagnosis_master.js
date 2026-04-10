@@ -130,10 +130,58 @@ function hasSignificantChange(oldHash, newHash) {
 }
 
 // ============================================================
-// 全記事の postId + URL + title を WP REST API で取得
-// ページネーションで全件取得（100件/ページ）
+// 全記事の postId + URL + title を取得
+//
+// 方式: Xserver 上の list_posts.php（DB直接アクセス）を呼び出し。
+// article_list_maker の generate_placement.php と同じパターン。
+// REST API のページネーション（~60秒）が ~1秒に短縮される。
+//
+// フォールバック: PHP が利用不可の場合は WP REST API で取得。
 // ============================================================
+const LIST_POSTS_TOKEN = 'ta_placement_8f3k2m9x7v1q4w6e';
+
 function fetchAllWpPosts() {
+  // まず PHP エンドポイントを試行
+  const posts = fetchAllWpPostsViaPHP();
+  if (posts && posts.length > 0) return posts;
+
+  // フォールバック: WP REST API
+  Logger.log('PHP エンドポイント不可 → WP REST API にフォールバック');
+  return fetchAllWpPostsViaREST();
+}
+
+function fetchAllWpPostsViaPHP() {
+  const siteUrl = CONFIG.WP_REST_BASE.replace('/wp-json/wp/v2', '');
+  const url = `${siteUrl}/list_posts.php?token=${LIST_POSTS_TOKEN}`;
+
+  try {
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) {
+      Logger.log(`list_posts.php: HTTP ${response.getResponseCode()}`);
+      return null;
+    }
+
+    const data = JSON.parse(response.getContentText());
+    if (data.error) {
+      Logger.log(`list_posts.php エラー: ${data.error}`);
+      return null;
+    }
+
+    const posts = (data.posts || []).map(p => ({
+      postId: String(p.id),
+      url: p.url || '',
+      title: p.title || '',
+    }));
+
+    Logger.log(`list_posts.php: ${posts.length}件取得（~1秒）`);
+    return posts;
+  } catch (e) {
+    Logger.log(`list_posts.php 例外: ${e.message}`);
+    return null;
+  }
+}
+
+function fetchAllWpPostsViaREST() {
   const username = PropertiesService.getScriptProperties().getProperty('WP_USERNAME');
   const appPassword = PropertiesService.getScriptProperties().getProperty('WP_APP_PASSWORD');
   const authHeader = 'Basic ' + Utilities.base64Encode(username + ':' + appPassword);
@@ -153,7 +201,7 @@ function fetchAllWpPosts() {
       });
 
       if (response.getResponseCode() !== 200) {
-        Logger.log(`WP API page ${page}: HTTP ${response.getResponseCode()}`);
+        Logger.log(`WP REST API page ${page}: HTTP ${response.getResponseCode()}`);
         break;
       }
 
@@ -168,14 +216,13 @@ function fetchAllWpPosts() {
         });
       });
 
-      Logger.log(`WP API page ${page}: ${posts.length}件取得 (累計: ${allPosts.length})`);
+      Logger.log(`WP REST API page ${page}: ${posts.length}件 (累計: ${allPosts.length})`);
 
       if (posts.length < perPage) break;
       page++;
-
       Utilities.sleep(200);
     } catch (e) {
-      Logger.log(`WP API page ${page} 例外: ${e.message}`);
+      Logger.log(`WP REST API page ${page} 例外: ${e.message}`);
       break;
     }
   }
