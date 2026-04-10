@@ -380,6 +380,16 @@ function mapPartnerToPluginSlug(partnerSlug) {
 
 // ============================================================
 // CTAブロックコメント生成
+//
+// soico-securities-cta v1.1.0 以降の V2 レンダラーを使用する。
+// version: "2" を必ず付与（省略すると V1 経路で旧デザインになる）。
+//
+// URL 解決はプラグイン側の会社データ層に委譲（B-lazy 方式）:
+//   1. customAffiliateUrl 未指定
+//   2. customThirstyLinkId 未指定
+//   3. プラグイン管理画面で会社ごとに設定された thirsty_link → direct_url が使われる
+//
+// 仕様: soico-securities-cta/docs/GAS_INTEGRATION_SPEC.md §3 / §6
 // ============================================================
 function buildCtaBlockComment(category, change, pluginSlug) {
   const config = CATEGORY_BLOCK_CONFIG[category];
@@ -387,9 +397,10 @@ function buildCtaBlockComment(category, change, pluginSlug) {
 
   const featureText = extractFeatureText(change.proposed);
   const blockName = config.inlineCta;
-  const attributes = {};
+
+  const attributes = { version: '2' };
   attributes[config.entityKey] = pluginSlug;
-  if (featureText) attributes['featureText'] = featureText;
+  if (featureText) attributes.featureText = featureText;
 
   return `<!-- wp:soico-cta/${blockName} ${JSON.stringify(attributes)} /-->`;
 }
