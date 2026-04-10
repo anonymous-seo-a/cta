@@ -336,6 +336,7 @@ function PartnerManager({ showToast }) {
 
 function AuditView({ showToast }) {
   const [duplicates, setDuplicates] = useState([]);
+  const [totalRemovable, setTotalRemovable] = useState(0);
   const [loading, setLoading] = useState(false);
   const [scanned, setScanned] = useState(false);
 
@@ -344,16 +345,24 @@ function AuditView({ showToast }) {
     try {
       const result = await api.auditDuplicates();
       setDuplicates(result.duplicates || []);
+      setTotalRemovable(result.totalRemovable || 0);
       setScanned(true);
-      showToast(`${result.total}件の重複CTAを検出`);
+      showToast(`${result.totalRemovable}件の重複CTAを検出（${result.total}セクション）`);
     } catch (e) {
       showToast(e.message, 'error');
     }
     setLoading(false);
   };
 
-  const handleRemove = async (dup, block, occurrence) => {
-    if (!confirm('このCTAブロックを削除しますか？（バックアップは自動保存されます）')) return;
+  const handleRemove = async (dup, block) => {
+    if (!confirm(`「${dup.heading}」セクション内の重複 ${block.blockType}:${block.partner} を削除しますか？`)) return;
+
+    // このブロックのセクション内での出現番号を計算（同一 blockType+partner の中で何番目か）
+    const sameTypeBlocks = dup.ctaBlocks.filter(b => b.blockType === block.blockType && b.partner === block.partner);
+    const blockIdx = sameTypeBlocks.indexOf(block);
+    // 2番目以降を消すので、occurrence = blockIdx + 1
+    const occurrence = blockIdx + 1;
+
     try {
       await api.removeCta(dup.postId, {
         partner: block.partner,
@@ -361,20 +370,28 @@ function AuditView({ showToast }) {
         sectionHeading: dup.heading,
         occurrence: occurrence,
       });
-      // UIから除去
+      // UIから除去して再計算
       setDuplicates(prev => prev.map(d => {
-        if (d.postId === dup.postId && d.heading === dup.heading && d.ctaBlocks) {
-          const newBlocks = [...d.ctaBlocks];
-          newBlocks.splice(occurrence - 1, 1);
-          return { ...d, ctaBlocks: newBlocks, ctaCount: newBlocks.length };
+        if (d.postId === dup.postId && d.heading === dup.heading) {
+          const newBlocks = d.ctaBlocks.filter(b => b !== block);
+          const dupCount = newBlocks.filter(b => b.action === 'remove').length;
+          return { ...d, ctaBlocks: newBlocks, dupCount };
         }
         return d;
-      }).filter(d => d.ctaCount > 1));
+      }).filter(d => d.dupCount > 0));
+      setTotalRemovable(prev => prev - 1);
       showToast('CTAを削除しました');
     } catch (e) {
       showToast(e.message, 'error');
     }
   };
+
+  // 記事単位でグルーピング
+  const grouped = {};
+  for (const d of duplicates) {
+    if (!grouped[d.postId]) grouped[d.postId] = { title: d.title, url: d.url, sections: [] };
+    grouped[d.postId].sections.push(d);
+  }
 
   return (
     <div>
@@ -382,7 +399,9 @@ function AuditView({ showToast }) {
         <button className="btn-apply" onClick={handleScan} disabled={loading}>
           {loading ? 'スキャン中...' : '重複CTAスキャン'}
         </button>
-        {scanned && <span style={{ fontSize: 14, color: '#888' }}>{duplicates.length}件の重複を検出</span>}
+        {scanned && <span style={{ fontSize: 14, color: '#888' }}>
+          {Object.keys(grouped).length}記事 / {duplicates.length}セクション / {totalRemovable}件の重複
+        </span>}
       </div>
 
       {loading && <div className="loading"><div className="spinner" /> 全記事をスキャン中...</div>}
@@ -391,38 +410,45 @@ function AuditView({ showToast }) {
         <div className="loading">重複CTAはありません</div>
       )}
 
-      {duplicates.map((d, di) => (
-        <div key={`${d.postId}-${d.sectionIndex}-${di}`} className="article-group" style={{ marginBottom: 12 }}>
+      {Object.entries(grouped).map(([postId, group]) => (
+        <div key={postId} className="article-group" style={{ marginBottom: 16 }}>
           <div className="article-header">
             <div>
-              <div className="article-title">{d.title}</div>
-              <div className="article-meta">
-                ID: {d.postId} | セクション: {d.heading} | CTA数: <span style={{ color: '#c62828', fontWeight: 700 }}>{d.ctaCount}</span>
-              </div>
+              <div className="article-title">{group.title}</div>
+              <div className="article-meta">ID: {postId} | {group.sections.length}セクションに重複あり</div>
             </div>
-            <a href={d.url} target="_blank" rel="noopener" className="article-link">記事を開く →</a>
+            <a href={group.url} target="_blank" rel="noopener" className="article-link">記事を開く →</a>
           </div>
 
-          {(d.ctaBlocks || []).map((block, bi) => (
-            <div key={bi} className="result-row">
-              <div className="result-row-header">
-                <div>
-                  <span className="result-heading">{block.blockType}</span>
-                  <span className="article-meta" style={{ marginLeft: 8 }}>partner: {block.partner}</span>
-                </div>
-                <span className={`status-badge ${bi === 0 ? 'approved' : 'rejected'}`}>
-                  {bi === 0 ? '残す' : '重複'}
-                </span>
+          {group.sections.map((section, si) => (
+            <div key={si}>
+              <div style={{ padding: '8px 16px', background: '#fff3e0', borderBottom: '1px solid #eee', fontSize: 13, fontWeight: 600 }}>
+                H2: {section.heading}（CTA {section.ctaCount}個、うち重複 {section.dupCount}個）
               </div>
-              {block.featureText && <div className="result-reason">「{block.featureText}」</div>}
-              <div className="result-actions">
-                {bi > 0 && (
-                  <button className="btn-reject btn-small" onClick={() => handleRemove(d, block, bi + 1)}>
-                    このCTAを削除
-                  </button>
-                )}
-                {bi === 0 && <span style={{ fontSize: 12, color: '#2e7d32' }}>最初のCTAは保持されます</span>}
-              </div>
+
+              {section.ctaBlocks.map((block, bi) => {
+                const actionColor = block.action === 'remove' ? '#ffebee' : block.action === 'keep' ? '#e8f5e9' : '#fafafa';
+                const actionLabel = block.action === 'remove' ? '重複（削除候補）' : block.action === 'keep' ? '残す' : '正常';
+                const badgeClass = block.action === 'remove' ? 'rejected' : block.action === 'keep' ? 'approved' : 'applied';
+
+                return (
+                  <div key={bi} style={{ padding: '10px 16px', borderBottom: '1px solid #f0f0f0', background: actionColor }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                      <div>
+                        <span style={{ fontSize: 12, color: '#888', marginRight: 8 }}>{block.blockType}</span>
+                        <span style={{ fontWeight: 500 }}>{block.partner}</span>
+                        {block.featureText && <span style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>「{block.featureText}」</span>}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <span className={`status-badge ${badgeClass}`}>{actionLabel}</span>
+                        {block.action === 'remove' && (
+                          <button className="btn-reject btn-small" onClick={() => handleRemove(section, block)}>削除</button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           ))}
         </div>
