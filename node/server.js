@@ -1,0 +1,441 @@
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const config = require('./config');
+const store = require('./store');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// React ビルド済みファイルを配信（本番用）
+app.use(express.static(path.join(__dirname, 'client/dist')));
+
+// ============================================================
+// Gap Fill コアロジック（gap-fill.js から関数を再利用）
+// ============================================================
+const Anthropic = require('@anthropic-ai/sdk');
+const client = new Anthropic({ apiKey: config.anthropic.apiKey });
+
+async function fetchArticlesFromPHP(postIds) {
+  const params = new URLSearchParams({ token: config.site.phpToken });
+  if (postIds && postIds.length > 0) {
+    params.set('post_ids', postIds.join(','));
+  } else {
+    params.set('limit', '9999');
+  }
+  const url = `${config.site.url}/gap_fill_prepare.php?${params}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`PHP: HTTP ${res.status}`);
+  return (await res.json()).posts;
+}
+
+async function loadPartnerDB() {
+  const fs = require('fs').promises;
+  const data = await fs.readFile(path.join(__dirname, 'data/partners.json'), 'utf-8');
+  return JSON.parse(data);
+}
+
+function buildPartnerListForPrompt(partners) {
+  return partners.map(p =>
+    `- ${p.slug}（${p.name}）: ${p.features.join('、')}\n  向いている文脈: ${p.bestFor.join(' / ')}`
+  ).join('\n');
+}
+
+async function callGapFillDiagnosis(post) {
+  const partnerDB = await loadPartnerDB();
+  const partners = partnerDB[post.category] || [];
+  const partnerListText = buildPartnerListForPrompt(partners);
+
+  const sectionList = post.sections.map(s => {
+    const marker = s.hasCta ? '★' : '　';
+    const excerptLine = s.hasCta ? '   → （CTA設置済み）' : `   → ${s.excerpt}`;
+    return `${s.index}. ${marker} ${s.heading}\n${excerptLine}`;
+  }).join('\n');
+
+  const systemPrompt = `あなたは金融アフィリエイトメディアのCTA配置最適化の専門家です。
+記事の各セクション（見出し＋内容要約）を読み、以下の3つを判定してください。
+
+1. 読者の購買意欲レベル（intent）
+2. セクションの文脈に最も合う提携案件（partner）
+3. セクション内容に合ったCTAマイクロコピー（featureText）
+
+【intent判定ルール】
+- intent: "high" / "medium" / "low"
+  - high: 商品比較・メリット解説・具体的な始め方・おすすめ紹介・シミュレーション結果・申込方法
+  - medium: 制度解説・基本情報・仕組み説明・費用概要
+  - low: リスク注意喚起・デメリット・税務処理・法的注意・Q&A・まとめ
+- ★付きセクション（CTA設置済み）は intent: "skip"
+
+【partner選定ルール】
+- high/medium のセクションにのみ、案件リストから**セクション内容に最も合う案件**を選ぶ
+- 各案件の「特徴」と「向いている文脈」を参照し、セクションの話題との関連度で判断する
+- 例: NISAの積立方法の説明 → 楽天証券（ポイント投資・NISA口座数No.1）
+- 例: 手数料比較セクション → SBI証券（最安手数料）
+- 例: 初心者向けの始め方 → 楽天証券 or Coincheck（UI/初心者向き）
+- 1記事内で同じ partner が連続しないよう分散させる
+- low のセクションは partner: null
+
+【featureText生成ルール】
+- 15〜30文字のCTAマイクロコピー。セクション内容と選定した案件の強みを組み合わせる
+- 良い例: 「楽天ポイントで積立投資を始めるなら」「手数料0円のSBI証券で口座開設」
+- 悪い例: 「詳細はこちら」「業界No.1」「今すぐ申し込む」
+
+【出力】JSON配列のみ
+[{"section": 1, "intent": "high", "partner": "rakuten", "featureText": "...", "reason": "..."}]`;
+
+  const response = await client.messages.create({
+    model: config.anthropic.model,
+    max_tokens: 2048,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: `以下の記事を判定してください。\n\n【記事カテゴリ】${post.category}\n【記事URL】${post.url}\n\n【セクション一覧】（★=CTA設置済み）\n${sectionList}\n\n【提携済み案件（優先順位順・特徴付き）】\n${partnerListText}` }],
+  });
+
+  const text = response.content[0].text.trim();
+  const match = text.match(/\[[\s\S]*\]/);
+  return match ? JSON.parse(match[0]) : null;
+}
+
+function buildCtaBlock(category, pluginSlug, featureText) {
+  const bc = config.categoryBlockConfig[category];
+  if (!bc) return '';
+  const attrs = { version: '2' };
+  attrs[bc.entityKey] = pluginSlug;
+  if (featureText) attrs.featureText = featureText;
+  return `<!-- wp:soico-cta/${bc.inlineCta} ${JSON.stringify(attrs)} /-->`;
+}
+
+function findSectionEndPosition(content, headingText) {
+  const blockRegex = /<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h([23])[^>]*>([\s\S]*?)<\/h\1>\s*<!-- \/wp:heading -->/gi;
+  const headings = [];
+  let m;
+  while ((m = blockRegex.exec(content)) !== null) {
+    headings.push({ text: m[2].replace(/<[^>]+>/g, '').trim(), level: parseInt(m[1]), start: m.index, end: m.index + m[0].length });
+  }
+  if (headings.length === 0) {
+    const htmlRegex = /<h([23])[^>]*>([\s\S]*?)<\/h\1>/gi;
+    while ((m = htmlRegex.exec(content)) !== null) {
+      headings.push({ text: m[2].replace(/<[^>]+>/g, '').trim(), level: parseInt(m[1]), start: m.index, end: m.index + m[0].length });
+    }
+  }
+  let idx = headings.findIndex(h => h.text === headingText);
+  if (idx === -1) idx = headings.findIndex(h => h.text.includes(headingText) || headingText.includes(h.text));
+  if (idx === -1) return -1;
+
+  const target = headings[idx];
+  let sectionEnd = content.length;
+  for (let i = idx + 1; i < headings.length; i++) {
+    if (headings[i].level <= target.level) { sectionEnd = headings[i].start; break; }
+  }
+  const sec = content.substring(target.end, sectionEnd);
+  const cbr = /<!-- \/wp:(paragraph|list|table|html|quote|image|heading)\s*-->/gi;
+  let lastEnd = -1, bm;
+  while ((bm = cbr.exec(sec)) !== null) lastEnd = bm.index + bm[0].length;
+  return lastEnd > 0 ? target.end + lastEnd : sectionEnd;
+}
+
+// ============================================================
+// API Routes
+// ============================================================
+
+// 統計ダッシュボード
+app.get('/api/stats', async (req, res) => {
+  const results = await store.getResults();
+  const history = await store.getHistory();
+  res.json({
+    total: results.length,
+    pending: results.filter(r => r.status === 'pending').length,
+    approved: results.filter(r => r.status === 'approved').length,
+    rejected: results.filter(r => r.status === 'rejected').length,
+    applied: results.filter(r => r.status === 'applied').length,
+    articles: [...new Set(results.map(r => r.postId))].length,
+    recentHistory: history.slice(0, 10),
+  });
+});
+
+// Gap Fill 結果一覧
+app.get('/api/results', async (req, res) => {
+  const results = await store.getResults();
+  res.json(results);
+});
+
+// Gap Fill 実行
+app.post('/api/gap-fill/run', async (req, res) => {
+  const { postIds } = req.body;
+  try {
+    const articles = await fetchArticlesFromPHP(postIds);
+    const targets = articles.filter(a => config.supportedCategories.includes(a.category));
+
+    const allPlans = [];
+    for (const post of targets) {
+      const gapCount = post.sections.filter(s => !s.hasCta).length;
+      if (gapCount === 0) continue;
+
+      const diagnosis = await callGapFillDiagnosis(post);
+      if (!diagnosis) continue;
+
+      const priority = config.partnerPriority[post.category] || [];
+      let pidx = 0;
+
+      for (const item of diagnosis) {
+        if (!item || item.intent === 'low' || item.intent === 'skip') continue;
+        const section = post.sections.find(s => s.index === item.section);
+        if (!section || section.hasCta) continue;
+
+        let slug = item.partner;
+        if (!slug || !priority.includes(slug)) { slug = priority[pidx % priority.length]; pidx++; }
+        else { const i = priority.indexOf(slug); if (i >= 0) pidx = i + 1; }
+
+        const pluginSlug = config.partnerSlugMap[slug] || slug.replace(/-/g, '_');
+        const featureText = (item.featureText || '').trim();
+
+        allPlans.push({
+          postId: post.id,
+          url: post.url,
+          title: post.title,
+          category: post.category,
+          heading: section.heading,
+          intent: item.intent,
+          partner: pluginSlug,
+          featureText,
+          reason: item.reason || '',
+          ctaBlock: buildCtaBlock(post.category, pluginSlug, featureText),
+          sections: post.sections,
+        });
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    const saved = await store.addResults(allPlans);
+    res.json({ added: allPlans.length, total: saved.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 単一アイテム更新（承認/却下/featureText編集/partner変更）
+app.patch('/api/results/:id', async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+
+  // featureText や partner が変更された場合、ctaBlock を再生成
+  if (updates.featureText !== undefined || updates.partner !== undefined) {
+    const results = await store.getResults();
+    const item = results.find(r => r.id === id);
+    if (item) {
+      const partner = updates.partner || item.partner;
+      const featureText = updates.featureText !== undefined ? updates.featureText : item.featureText;
+      updates.ctaBlock = buildCtaBlock(item.category, partner, featureText);
+    }
+  }
+
+  const updated = await store.updateResult(id, updates);
+  if (!updated) return res.status(404).json({ error: 'Not found' });
+  res.json(updated);
+});
+
+// 一括ステータス変更
+app.post('/api/results/bulk-status', async (req, res) => {
+  const { ids, status } = req.body;
+  const results = await store.bulkUpdateStatus(ids, status);
+  res.json({ updated: ids.length });
+});
+
+// featureText 再生成
+app.post('/api/results/:id/regenerate', async (req, res) => {
+  const { id } = req.params;
+  const results = await store.getResults();
+  const item = results.find(r => r.id === id);
+  if (!item) return res.status(404).json({ error: 'Not found' });
+
+  try {
+    const response = await client.messages.create({
+      model: config.anthropic.model,
+      max_tokens: 256,
+      messages: [{ role: 'user', content: `以下のセクションに対するCTAマイクロコピーを3つ提案してください。15〜30文字で、読者の行動を後押しする内容。\n\n記事: ${item.title}\nセクション: ${item.heading}\nカテゴリ: ${item.category}\n案件: ${item.partner}\n\nJSON配列で出力: ["候補1", "候補2", "候補3"]` }],
+    });
+    const text = response.content[0].text.trim();
+    const match = text.match(/\[[\s\S]*\]/);
+    const candidates = match ? JSON.parse(match[0]) : [];
+    res.json({ candidates });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 承認済みアイテムを WordPress に反映
+app.post('/api/apply', async (req, res) => {
+  const { ids } = req.body; // 指定なしなら全approved
+  const results = await store.getResults();
+  const targets = ids
+    ? results.filter(r => ids.includes(r.id) && (r.status === 'approved' || r.status === 'pending'))
+    : results.filter(r => r.status === 'approved');
+
+  if (targets.length === 0) return res.json({ applied: 0 });
+
+  const auth = Buffer.from(`${config.wp.username}:${config.wp.appPassword}`).toString('base64');
+  const byPost = {};
+  for (const t of targets) {
+    if (!byPost[t.postId]) byPost[t.postId] = [];
+    byPost[t.postId].push(t);
+  }
+
+  let appliedCount = 0;
+  const errors = [];
+
+  for (const [postId, changes] of Object.entries(byPost)) {
+    try {
+      // 記事取得
+      const getRes = await fetch(`${config.wp.restBase}/posts/${postId}?context=edit`, {
+        headers: { 'Authorization': `Basic ${auth}` },
+      });
+      if (!getRes.ok) { errors.push({ postId, error: `GET ${getRes.status}` }); continue; }
+
+      const postData = await getRes.json();
+      const originalContent = postData.content.raw;
+
+      // バックアップ保存（ロールバック用）
+      const backupFile = await store.saveBackup(postId, originalContent);
+
+      // 挿入位置を特定して後ろから挿入
+      let content = originalContent;
+      const insertions = [];
+      for (const c of changes) {
+        const pos = findSectionEndPosition(content, c.heading);
+        if (pos >= 0) insertions.push({ position: pos, ctaBlock: c.ctaBlock, id: c.id });
+      }
+      insertions.sort((a, b) => b.position - a.position);
+      for (const ins of insertions) {
+        content = content.substring(0, ins.position) + '\n\n' + ins.ctaBlock + '\n\n' + content.substring(ins.position);
+      }
+
+      // WordPress 更新
+      const putRes = await fetch(`${config.wp.restBase}/posts/${postId}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+
+      if (putRes.ok) {
+        for (const c of changes) {
+          await store.updateResult(c.id, { status: 'applied', appliedAt: new Date().toISOString() });
+        }
+        await store.addHistoryEntry({
+          postId,
+          title: changes[0].title,
+          url: changes[0].url,
+          insertedCount: insertions.length,
+          backupFile,
+          items: changes.map(c => ({ id: c.id, heading: c.heading, partner: c.partner })),
+        });
+        appliedCount += insertions.length;
+      } else {
+        errors.push({ postId, error: `POST ${putRes.status}` });
+      }
+
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (e) {
+      errors.push({ postId, error: e.message });
+    }
+  }
+
+  res.json({ applied: appliedCount, errors });
+});
+
+// ロールバック
+app.post('/api/rollback/:historyId', async (req, res) => {
+  const history = await store.getHistory();
+  const entry = history.find(h => h.id === req.params.historyId);
+  if (!entry) return res.status(404).json({ error: 'History not found' });
+
+  try {
+    const originalContent = await store.loadBackup(entry.backupFile);
+    const auth = Buffer.from(`${config.wp.username}:${config.wp.appPassword}`).toString('base64');
+
+    const putRes = await fetch(`${config.wp.restBase}/posts/${entry.postId}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: originalContent }),
+    });
+
+    if (putRes.ok) {
+      // 関連する results のステータスを pending に戻す
+      for (const item of entry.items) {
+        await store.updateResult(item.id, { status: 'pending', appliedAt: null });
+      }
+      await store.addHistoryEntry({
+        postId: entry.postId,
+        title: entry.title,
+        url: entry.url,
+        action: 'rollback',
+        originalHistoryId: entry.id,
+      });
+      res.json({ success: true });
+    } else {
+      res.status(500).json({ error: `WordPress更新失敗: ${putRes.status}` });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 反映履歴
+app.get('/api/history', async (req, res) => {
+  const history = await store.getHistory();
+  res.json(history);
+});
+
+// Partner DB — CRUD
+app.get('/api/partners', async (req, res) => {
+  const db = await loadPartnerDB();
+  res.json(db);
+});
+
+app.get('/api/partners/:category', async (req, res) => {
+  const db = await loadPartnerDB();
+  res.json(db[req.params.category] || []);
+});
+
+app.put('/api/partners', async (req, res) => {
+  const fs = require('fs').promises;
+  await fs.writeFile(path.join(__dirname, 'data/partners.json'), JSON.stringify(req.body, null, 2), 'utf-8');
+  res.json({ success: true });
+});
+
+app.put('/api/partners/:category/:slug', async (req, res) => {
+  const fs = require('fs').promises;
+  const db = await loadPartnerDB();
+  const cat = req.params.category;
+  const slug = req.params.slug;
+  if (!db[cat]) db[cat] = [];
+
+  const idx = db[cat].findIndex(p => p.slug === slug);
+  if (idx >= 0) {
+    db[cat][idx] = { ...db[cat][idx], ...req.body };
+  } else {
+    db[cat].push({ slug, ...req.body });
+  }
+  await fs.writeFile(path.join(__dirname, 'data/partners.json'), JSON.stringify(db, null, 2), 'utf-8');
+  res.json(db[cat]);
+});
+
+app.delete('/api/partners/:category/:slug', async (req, res) => {
+  const fs = require('fs').promises;
+  const db = await loadPartnerDB();
+  const cat = req.params.category;
+  if (db[cat]) {
+    db[cat] = db[cat].filter(p => p.slug !== req.params.slug);
+  }
+  await fs.writeFile(path.join(__dirname, 'data/partners.json'), JSON.stringify(db, null, 2), 'utf-8');
+  res.json({ success: true });
+});
+
+// React SPA フォールバック
+app.get('/{0,}', (req, res) => {
+  res.sendFile(path.join(__dirname, 'client/dist/index.html'));
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`CTA Gap Fill Server: http://localhost:${PORT}`);
+});
