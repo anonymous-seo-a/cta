@@ -2,19 +2,26 @@
 // CTA Gap Fill: CTA空白セクションを検出し挿入候補を自動生成
 //
 // 既存のCVR診断パイプラインとは独立して動作する。
-// Claude API はセクション単位の購買意欲判定（intent）にのみ使用。
-// コストは既存フル診断の約1/5（~$0.006/記事）。
+// Claude API は以下の3点を判定:
+//   1. セクション購買意欲（intent: high/medium/low）
+//   2. 文脈に最も合う提携案件（partner）
+//   3. セクション内容に合ったマイクロコピー（featureText）
+//
+// セクション冒頭150文字を Claude に渡すことで、
+// 見出しだけでは分からない具体的な文脈を理解させる。
+//
+// コストは既存フル診断の約1/3（~$0.012/記事）。
 //
 // フロー:
 //   1. WP REST API で記事コンテンツを取得
-//   2. H2見出し一覧を抽出
+//   2. H2見出し一覧を抽出 + 各セクション冒頭150文字を取得
 //   3. 各セクションの既存CTA有無を検出
-//   4. CTA無しセクションについて Claude で購買意欲 intent を判定
+//   4. Claude で intent + partner + featureText を判定
 //   5. intent=high/medium のセクションにのみ挿入候補を生成
-//   6. partner はプラグイン比較表CTAの優先順位に従いラウンドロビン配分
-//   7. cta_gap_fill_plan シートに出力（承認待ち）
+//   6. cta_gap_fill_plan シートに出力（featureText列あり、承認前にDaiki編集可能）
 //
 // 承認後の反映: applyApprovedGapFills() を実行
+//   → シートのL列 featureText を読み取って CTAブロックを再構築
 // ============================================================
 
 // ============================================================
@@ -31,10 +38,6 @@ const CATEGORY_PARTNER_PRIORITY = {
 
 // ============================================================
 // 商材優先順位をプラグイン REST API から動的取得
-//
-// エンドポイント: /wp-json/soico-cta/v1/priorities?category=<cat>
-// 未実装時はハードコード値にフォールバック。
-// TODO: soico-securities-cta プラグインに REST endpoint を追加する
 // ============================================================
 function fetchPartnerPriority(category) {
   try {
@@ -58,7 +61,6 @@ function fetchPartnerPriority(category) {
 
 // ============================================================
 // セクション内の既存CTA検出
-// soico-cta Gutenbergブロック と ThirstyAffiliates リンクのみ対象
 // ============================================================
 function detectExistingCtaInSection(sectionContent) {
   if (/<!-- wp:soico-cta\//.test(sectionContent)) return true;
@@ -67,42 +69,78 @@ function detectExistingCtaInSection(sectionContent) {
 }
 
 // ============================================================
+// セクションコンテンツからプレーンテキスト要約を抽出
+// HTMLタグ・Gutenbergコメント・改行を除去し、先頭maxChars文字を返す
+// ============================================================
+function extractSectionExcerpt(sectionContent, maxChars) {
+  const cleaned = sectionContent
+    .replace(/<!-- [\s\S]*?-->/g, '')   // Gutenbergコメント除去
+    .replace(/<[^>]+>/g, '')            // HTMLタグ除去
+    .replace(/\n+/g, ' ')              // 改行→スペース
+    .replace(/\s+/g, ' ')             // 連続スペース圧縮
+    .trim();
+  return cleaned.substring(0, maxChars);
+}
+
+// ============================================================
 // Gap Fill 用 Claude API 呼び出し
-// 入力: セクション一覧 + 提携案件リスト
-// 出力: 各セクションの intent + 推奨 partner
+// 入力: セクション一覧（見出し+冒頭要約）+ 提携案件リスト
+// 出力: 各セクションの intent + partner + featureText
 // ============================================================
 function callGapFillDiagnosis(params, apiKey) {
   const sectionList = params.sections.map(s => {
     const marker = s.hasCta ? '★' : '　';
-    return `${s.index}. ${marker} ${s.heading}`;
+    const excerptLine = s.hasCta
+      ? '   → （CTA設置済み）'
+      : `   → ${s.excerpt}`;
+    return `${s.index}. ${marker} ${s.heading}\n${excerptLine}`;
   }).join('\n');
 
   const partnerPriority = fetchPartnerPriority(params.category);
   const partnerListText = partnerPriority.join(', ');
 
   const systemPrompt = `あなたは金融アフィリエイトメディアのCTA配置最適化の専門家です。
-記事の各セクション見出しを読み、読者の購買意欲レベルを判定してください。
+記事の各セクション（見出し＋内容要約）を読み、以下の3つを判定してください。
 
-【判定ルール】
+1. 読者の購買意欲レベル（intent）
+2. セクションの文脈に最も合う提携案件（partner）
+3. セクション内容に合ったCTAマイクロコピー（featureText）
+
+【intent判定ルール】
 - intent: "high" / "medium" / "low"
   - high: 商品比較・メリット解説・具体的な始め方・おすすめ紹介・シミュレーション結果・申込方法など、読者が行動を検討するセクション
   - medium: 制度解説・基本情報・仕組み説明・費用概要など、理解が深まり間接的に行動につながるセクション
   - low: リスク注意喚起・デメリット・税務処理・法的注意・Q&A・まとめなど、購買意欲と無関係または逆方向のセクション
 - ★付きセクション（CTA設置済み）は intent: "skip" とする
-- intent が high または medium のセクションにのみ、提携案件リストから最も文脈に合う案件slugを1つ選んで partner に設定する
-  - 案件リストは優先順位順に並んでいる。文脈に合う案件が複数ある場合はリスト先頭の案件を優先する
-  - 1記事内で同じ partner が連続しないよう分散させる
-- intent が low のセクションは partner: null とする
+
+【partner選定ルール】
+- intent が high/medium のセクションにのみ、提携案件リストからセクション内容に最も合う案件slugを1つ選ぶ
+- 案件リストは優先順位順。文脈に合う案件が複数ある場合はリスト先頭を優先
+- 1記事内で同じ partner が連続しないよう分散させる
+- セクションの話題（例: 口座開設の簡便さ、ポイント投資、手数料比較）と案件の強みがマッチするものを選ぶ
+
+【featureText生成ルール】
+- intent が high/medium のセクションに、CTAボタン上に表示する訴求テキストを1行（15〜30文字）で生成する
+- セクションの内容を読者が読んだ直後を想定し、「このセクションを読んだ人が次に取りたい行動」を後押しするコピーにする
+- 良い例:
+  - 教育資金の積立方法セクション → 「新制度開始まで親名義で教育資金作りを始めるなら」
+  - メリット解説セクション → 「非課税で教育資金を増やせる口座を今すぐ開設」
+  - 証券会社比較セクション → 「手数料0円で始められる楽天証券の詳細」
+  - 仮想通貨の始め方セクション → 「最短10分で口座開設｜取引手数料無料」
+- 悪い例:
+  - 「詳細はこちら」（具体性がない）
+  - 「業界No.1」（根拠なき最上級表現。景表法リスク）
+  - 「今すぐ申し込む」（CTAボタン文言はレギュレーション固定のため変更不可）
 
 【出力形式】JSON配列のみ出力してください。JSON以外のテキストは出力しないでください。
-[{"section": 1, "intent": "high", "partner": "rakuten", "reason": "理由1行"}]`;
+[{"section": 1, "intent": "high", "partner": "rakuten", "featureText": "教育資金の積立をポイントで始めるなら", "reason": "理由1行"}]`;
 
   const userPrompt = `以下の記事を判定してください。
 
 【記事カテゴリ】${params.category}
 【記事URL】${params.url}
 
-【セクション一覧】（★=CTA設置済み）
+【セクション一覧】（★=CTA設置済み、各セクションの冒頭内容を要約付き）
 ${sectionList}
 
 【提携済み案件（優先順位順）】${partnerListText}`;
@@ -117,7 +155,7 @@ ${sectionList}
       },
       payload: JSON.stringify({
         model: CLAUDE_CONFIG.MODEL,
-        max_tokens: 1024,
+        max_tokens: 2048,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
       }),
@@ -132,7 +170,6 @@ ${sectionList}
     const result = JSON.parse(response.getContentText());
     const text = result.content[0].text.trim();
 
-    // JSON配列を抽出（前後に余計なテキストがある場合に対応）
     const jsonMatch = text.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
       Logger.log(`Gap Fill: JSON解析失敗: ${text.substring(0, 200)}`);
@@ -148,9 +185,6 @@ ${sectionList}
 
 // ============================================================
 // Gap Fill メイン処理
-//
-// @param {string[]} [targetPostIds] - 対象記事IDの配列。
-//   省略時は最新の週次レポートシートから取得。
 // ============================================================
 function runGapFill(targetPostIds) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -161,7 +195,6 @@ function runGapFill(targetPostIds) {
     return;
   }
 
-  // 対象記事の取得
   let targets;
   if (targetPostIds && targetPostIds.length > 0) {
     targets = targetPostIds.map(id => ({ postId: String(id), url: '' }));
@@ -213,7 +246,7 @@ function runGapFill(targetPostIds) {
       continue;
     }
 
-    // 各H2セクションのCTA有無を検出
+    // 各H2セクションのCTA有無 + 冒頭150文字を取得
     const sections = [];
     for (let i = 0; i < h2Headings.length; i++) {
       const sectionStart = h2Headings[i].endPosition;
@@ -222,11 +255,13 @@ function runGapFill(targetPostIds) {
         : content.length;
       const sectionContent = content.substring(sectionStart, sectionEnd);
       const hasCta = detectExistingCtaInSection(sectionContent);
+      const excerpt = extractSectionExcerpt(sectionContent, 150);
 
       sections.push({
         index: i + 1,
         heading: h2Headings[i].text,
         hasCta: hasCta,
+        excerpt: excerpt,
         headingData: h2Headings[i],
       });
     }
@@ -239,7 +274,7 @@ function runGapFill(targetPostIds) {
       continue;
     }
 
-    // Claude で intent 判定
+    // Claude で intent + partner + featureText 判定
     const diagnosis = callGapFillDiagnosis({
       url: url,
       category: category,
@@ -251,7 +286,7 @@ function runGapFill(targetPostIds) {
       continue;
     }
 
-    // partner 優先順位取得
+    // partner 優先順位（ラウンドロビンフォールバック用）
     const partnerPriority = fetchPartnerPriority(category);
     let partnerIdx = 0;
 
@@ -267,7 +302,6 @@ function runGapFill(targetPostIds) {
         partnerSlug = partnerPriority[partnerIdx % partnerPriority.length];
         partnerIdx++;
       } else {
-        // Claude推奨を使った場合もインデックスを進める（同一partner連続回避）
         const idxInPriority = partnerPriority.indexOf(partnerSlug);
         if (idxInPriority >= 0) partnerIdx = idxInPriority + 1;
       }
@@ -279,9 +313,12 @@ function runGapFill(targetPostIds) {
         continue;
       }
 
-      // CTAブロック生成（featureText は空 → プラグイン側デフォルト使用）
+      // featureText: Claude生成値を使用
+      const featureText = (item.featureText || '').trim();
+
+      // CTAブロック生成（featureText付き）
       const ctaBlock = buildCtaBlockComment(category, {
-        proposed: '',
+        proposed: featureText ? `「${featureText}」` : '',
         partnerSlug: partnerSlug,
       }, pluginSlug);
 
@@ -295,10 +332,11 @@ function runGapFill(targetPostIds) {
         pluginSlug: pluginSlug,
         ctaBlock: ctaBlock,
         matchedHeading: section.heading,
+        featureText: featureText,
         status: '承認待ち',
       });
 
-      Logger.log(`  ✓ ${section.heading} → ${pluginSlug} (${item.intent})`);
+      Logger.log(`  ✓ ${section.heading} → ${pluginSlug} (${item.intent}) 「${featureText}」`);
     }
 
     processed++;
@@ -316,10 +354,8 @@ function runGapFill(targetPostIds) {
 
 // ============================================================
 // テスト用: 指定記事IDで Gap Fill を実行
-// GASエディタから直接実行できるラッパー
 // ============================================================
 function testGapFill() {
-  // テスト用記事ID（soico.jp/no1/ の記事）
   runGapFill(['5286', '18924', '6504']);
 }
 
@@ -353,7 +389,12 @@ function getGapFillTargetsFromWeeklySheet(ss) {
 
 // ============================================================
 // Gap Fill 計画をスプレッドシートに出力
-// cta_insertion_plan と同じカラム構造
+//
+// 列構造:
+//   A: 記事URL, B: 投稿ID, C: カテゴリ, D: 挿入位置, E: 提案内容,
+//   F: 案件(TA slug), G: 案件(プラグイン), H: CTAブロック,
+//   I: マッチ見出し, J: ステータス, K: 備考,
+//   L: featureText（★Daiki編集可能。承認前に書き換えると反映時に使われる）
 // ============================================================
 function writeGapFillPlanSheet(ss, plans) {
   const sheetName = 'cta_gap_fill_plan';
@@ -374,6 +415,7 @@ function writeGapFillPlanSheet(ss, plans) {
     'マッチ見出し',         // I
     'ステータス',           // J
     '備考',                 // K
+    'featureText（編集可）', // L ★
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -386,6 +428,7 @@ function writeGapFillPlanSheet(ss, plans) {
     p.url, p.postId, p.category, p.location, p.proposed,
     p.partnerSlug, p.pluginSlug, p.ctaBlock,
     p.matchedHeading || '', p.status, '',
+    p.featureText || '',
   ]);
 
   if (rows.length > 0) {
@@ -398,6 +441,13 @@ function writeGapFillPlanSheet(ss, plans) {
   sheet.setColumnWidth(8, 500);
   sheet.setColumnWidth(9, 300);
   sheet.setColumnWidth(10, 150);
+  sheet.setColumnWidth(12, 350);
+
+  // L列（featureText）のスタイル: 編集可能であることを視覚的に示す
+  if (rows.length > 0) {
+    const ftRange = sheet.getRange(2, 12, rows.length, 1);
+    ftRange.setBackground('#FFF9C4'); // 薄い黄色: 編集可能
+  }
 
   const statusRange = sheet.getRange(2, 10, Math.max(rows.length, 1), 1);
   sheet.setConditionalFormatRules([
@@ -414,8 +464,116 @@ function writeGapFillPlanSheet(ss, plans) {
 
 // ============================================================
 // 承認済みの Gap Fill をWordPressに反映
-// cta_gap_fill_plan シートから読み取り、既存の反映ロジックを使用
+//
+// シートの L列 featureText を読み取り、CTAブロックを再構築する。
+// Daikiが承認前にL列を書き換えた場合、書き換え後の値が使われる。
 // ============================================================
 function applyApprovedGapFills() {
-  applyApprovedInsertionsFromSheet('cta_gap_fill_plan');
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('cta_gap_fill_plan');
+
+  if (!sheet) {
+    Logger.log('cta_gap_fill_planシートが見つかりません。');
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log('データがありません。');
+    return;
+  }
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 12).getValues();
+
+  const changesByPost = {};
+  for (let i = 0; i < data.length; i++) {
+    const postId = data[i][1];       // B列: 投稿ID
+    const status = data[i][9];       // J列: ステータス
+    const category = data[i][2];     // C列: カテゴリ
+    const pluginSlug = data[i][6];   // G列: 案件(プラグイン)
+    const matchedHeading = data[i][8]; // I列: マッチ見出し
+    const featureText = (data[i][11] || '').trim(); // L列: featureText（編集後）
+
+    if (status !== '承認') continue;
+    if (!postId) continue;
+
+    // L列の featureText で CTAブロックを再構築
+    const ctaBlock = buildCtaBlockComment(category, {
+      proposed: featureText ? `「${featureText}」` : '',
+      partnerSlug: '',
+    }, pluginSlug);
+
+    if (!changesByPost[postId]) {
+      changesByPost[postId] = {
+        url: data[i][0],
+        category: category,
+        changes: [],
+        rowNumbers: [],
+      };
+    }
+    changesByPost[postId].changes.push({
+      matchedHeading: matchedHeading,
+      ctaBlock: ctaBlock,
+    });
+    changesByPost[postId].rowNumbers.push(i + 2);
+  }
+
+  const postIds = Object.keys(changesByPost);
+  if (postIds.length === 0) {
+    Logger.log('承認済みの変更がありません。J列を「承認」に変更してから再実行してください。');
+    return;
+  }
+
+  Logger.log(`=== Gap Fill 反映: ${postIds.length}記事 ===`);
+
+  for (const postId of postIds) {
+    const postInfo = changesByPost[postId];
+    Logger.log(`--- 記事更新: ${postInfo.url} (ID: ${postId}) ---`);
+
+    const postData = fetchWpPost(postId);
+    if (!postData) {
+      Logger.log(`記事取得失敗: ID ${postId}`);
+      postInfo.rowNumbers.forEach(row => sheet.getRange(row, 10).setValue('取得失敗'));
+      continue;
+    }
+
+    let content = postData.content.raw;
+    let insertedCount = 0;
+
+    const insertions = [];
+    for (const change of postInfo.changes) {
+      const insertPos = findSectionEndInsertPosition(content, change.matchedHeading);
+      if (insertPos >= 0) {
+        insertions.push({ position: insertPos, ctaBlock: change.ctaBlock });
+      } else {
+        Logger.log(`挿入位置不明: ${change.matchedHeading}`);
+      }
+    }
+
+    // 後ろから挿入（インデックスがずれないように）
+    insertions.sort((a, b) => b.position - a.position);
+    for (const ins of insertions) {
+      content = content.substring(0, ins.position) + '\n\n' + ins.ctaBlock + '\n\n' + content.substring(ins.position);
+      insertedCount++;
+    }
+
+    if (insertedCount === 0) {
+      Logger.log('挿入箇所が見つかりませんでした');
+      postInfo.rowNumbers.forEach(row => sheet.getRange(row, 10).setValue('挿入位置不明'));
+      continue;
+    }
+
+    const success = updateWpPost(postId, content);
+    if (success) {
+      Logger.log(`更新成功: ${insertedCount}箇所にCTAを挿入`);
+      postInfo.rowNumbers.forEach(row => sheet.getRange(row, 10).setValue('反映済み'));
+    } else {
+      Logger.log('WordPress更新失敗');
+      postInfo.rowNumbers.forEach(row => sheet.getRange(row, 10).setValue('更新失敗'));
+    }
+
+    Utilities.sleep(1000);
+  }
+
+  Logger.log('=== Gap Fill 反映完了 ===');
 }
