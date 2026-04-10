@@ -48,8 +48,12 @@ const COL = {
   DIAGNOSIS_STATUS: 11,// L
   GAP_FILL_STATUS: 12,// M
   LAST_SCORED: 13,    // N
+  PROBLEMS: 14,       // O: 診断で検出された問題点
+  PLAN_A: 15,         // P: 改善案A（CTA挿入計画の入力源）
+  PLAN_B: 16,         // Q: 改善案B
+  PLAN_C: 17,         // R: 改善案C
 };
-const MASTER_COL_COUNT = 14;
+const MASTER_COL_COUNT = 18;
 
 // ============================================================
 // 台帳シートの取得 or 初期化
@@ -65,6 +69,7 @@ function getOrCreateMasterSheet(ss) {
     '月間PV(imps)', 'impressions', 'clicks', 'affiliateClicks',
     'スコア', 'snapshotHash',
     '最終診断日', '診断ステータス', 'GapFillステータス', '最終スコアリング日',
+    '問題点', '改善案A', '改善案B', '改善案C',
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -330,6 +335,8 @@ function runWeeklyScoring() {
           article.score, newHash,
           oldRow[COL.LAST_DIAGNOSED] || '', newStatus,
           oldRow[COL.GAP_FILL_STATUS] || '', now,
+          oldRow[COL.PROBLEMS] || '', oldRow[COL.PLAN_A] || '',
+          oldRow[COL.PLAN_B] || '', oldRow[COL.PLAN_C] || '',
         ],
       });
       updatedCount++;
@@ -348,6 +355,7 @@ function runWeeklyScoring() {
         article.impressions, article.impressions, article.gscClicks, article.affiliateClicks,
         article.score, newHash,
         '', newStatus, '', now,
+        '', '', '', '',
       ]);
       newCount++;
     }
@@ -392,8 +400,153 @@ function applyMasterConditionalFormatting(sheet) {
 }
 
 // ============================================================
+// Phase C: 台帳ベースのレジューム式 Claude 診断バッチ
+//
+// 台帳の diagnosisStatus = '未診断' or '要再診断' の記事を
+// score 降順で取得し、1件ずつ Claude API で診断する。
+//
+// GAS 5分制約のため、時間制限に達したら中断。
+// 診断済みの記事は台帳の status を '診断済み' に更新するので、
+// 次回実行時は自動的に続きから再開される（レジューム）。
+//
+// 自動トリガー（5分間隔）で連続実行すれば全件処理できる。
+// ============================================================
+function runDiagnosisBatch() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(MASTER_SHEET_NAME);
+
+  if (!sheet) {
+    Logger.log('台帳シートが見つかりません。先に testWeeklyScoring() を実行してください。');
+    return;
+  }
+
+  const apiKey = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
+  if (!apiKey) {
+    Logger.log('CLAUDE_API_KEY が設定されていません');
+    return;
+  }
+
+  // 台帳データ読み込み
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log('台帳にデータがありません');
+    return;
+  }
+
+  const data = sheet.getRange(2, 1, lastRow - 1, MASTER_COL_COUNT).getValues();
+
+  // 診断対象を抽出（未診断 or 要再診断）→ score降順
+  const targets = [];
+  for (let i = 0; i < data.length; i++) {
+    const status = data[i][COL.DIAGNOSIS_STATUS];
+    if (status === '未診断' || status === '要再診断') {
+      targets.push({
+        dataIndex: i,
+        sheetRow: i + 2,
+        postId: String(data[i][COL.POST_ID]),
+        url: data[i][COL.URL],
+        category: data[i][COL.CATEGORY],
+        impressions: data[i][COL.IMPRESSIONS],
+        clicks: data[i][COL.CLICKS],
+        affiliateClicks: data[i][COL.AFFILIATE_CLICKS],
+        score: data[i][COL.SCORE],
+      });
+    }
+  }
+
+  targets.sort((a, b) => b.score - a.score);
+
+  if (targets.length === 0) {
+    Logger.log('診断対象がありません（全て診断済み or スキップ）');
+    return;
+  }
+
+  Logger.log(`=== 診断バッチ開始: ${targets.length}件が対象 ===`);
+
+  // 提携済み案件リスト（1回だけ取得）
+  const partnerList = fetchAllThirstyLinks();
+  Logger.log(`提携済み案件: ${partnerList.length} 件`);
+
+  const START_TIME = new Date().getTime();
+  const TIME_LIMIT_MS = 4.5 * 60 * 1000; // 安全マージン30秒
+  const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+  let diagnosed = 0;
+  let errors = 0;
+
+  for (const target of targets) {
+    if (new Date().getTime() - START_TIME > TIME_LIMIT_MS) {
+      Logger.log(`時間制限到達。${diagnosed}件完了、残り${targets.length - diagnosed - errors}件は次回実行。`);
+      break;
+    }
+
+    Logger.log(`\n--- 診断 [${diagnosed + 1}]: ${target.url} (score: ${target.score}) ---`);
+
+    try {
+      // CTA構造をスクレイプ
+      const ctaStructure = scrapeCtaStructure(target.url);
+      if (!ctaStructure) {
+        Logger.log('スクレイプ失敗');
+        sheet.getRange(target.sheetRow, COL.DIAGNOSIS_STATUS + 1).setValue('スクレイプ失敗');
+        errors++;
+        continue;
+      }
+
+      // GSC上位キーワード
+      const topKeywords = fetchTopKeywordsForPage(target.url);
+      const searchIntent = estimateSearchIntent(topKeywords);
+
+      // Claude API 診断
+      const diagnosis = callClaudeDiagnosis({
+        articleUrl: target.url,
+        topKeywords: topKeywords,
+        impressions: target.impressions,
+        clicks: target.clicks,
+        affiliateClicks: target.affiliateClicks,
+        searchIntent: searchIntent,
+        ctaStructure: ctaStructure,
+        partnerList: partnerList,
+      });
+
+      if (!diagnosis) {
+        Logger.log('診断エラー（Claude API）');
+        sheet.getRange(target.sheetRow, COL.DIAGNOSIS_STATUS + 1).setValue('診断エラー');
+        errors++;
+        continue;
+      }
+
+      // 台帳に結果を書き込み
+      sheet.getRange(target.sheetRow, COL.LAST_DIAGNOSED + 1).setValue(now);
+      sheet.getRange(target.sheetRow, COL.DIAGNOSIS_STATUS + 1).setValue('診断済み');
+      sheet.getRange(target.sheetRow, COL.PROBLEMS + 1).setValue(formatProblems(diagnosis.problems));
+      sheet.getRange(target.sheetRow, COL.PLAN_A + 1).setValue(formatPlan(diagnosis.plan_a));
+      sheet.getRange(target.sheetRow, COL.PLAN_B + 1).setValue(formatPlan(diagnosis.plan_b));
+      sheet.getRange(target.sheetRow, COL.PLAN_C + 1).setValue(formatPlan(diagnosis.plan_c));
+
+      diagnosed++;
+      Logger.log(`診断完了: ${target.url}`);
+
+      Utilities.sleep(2000); // API レート制限回避
+
+    } catch (e) {
+      Logger.log(`エラー: ${e.message}`);
+      sheet.getRange(target.sheetRow, COL.DIAGNOSIS_STATUS + 1).setValue('エラー: ' + e.message.substring(0, 50));
+      errors++;
+    }
+  }
+
+  Logger.log(`\n=== 診断バッチ完了: ${diagnosed}件診断, ${errors}件エラー, 残り${targets.length - diagnosed - errors}件 ===`);
+}
+
+// ============================================================
 // テスト用: runWeeklyScoring を実行
 // ============================================================
 function testWeeklyScoring() {
   runWeeklyScoring();
+}
+
+// ============================================================
+// テスト用: runDiagnosisBatch を実行（上位3件のみ）
+// ============================================================
+function testDiagnosisBatch() {
+  runDiagnosisBatch();
 }
