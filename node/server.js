@@ -517,13 +517,20 @@ app.post('/api/audit/duplicates', async (req, res) => {
   }
 });
 
-// CTA除外: partner + featureText の正規表現マッチで N番目を削除
+// CTA除外: セクション内の連続重複CTAを削除
+//
+// ロジック:
+//   1. 記事の content.raw を取得
+//   2. 指定された sectionHeading の H2 を見つける
+//   3. そのセクション範囲内で soico-cta ブロックを全検索
+//   4. セクション内の occurrence 番目を削除（デフォルト=2、重複の方）
+//   ※ 他セクションの同一CTAには影響しない
 app.post('/api/audit/remove-cta', async (req, res) => {
-  const { postId, blockType, partner, featureText, occurrence } = req.body;
-  if (!postId || !partner) return res.status(400).json({ error: 'postId and partner required' });
+  const { postId, partner, featureText, sectionHeading, occurrence } = req.body;
+  if (!postId || !sectionHeading) return res.status(400).json({ error: 'postId and sectionHeading required' });
 
   const auth = Buffer.from(`${config.wp.username}:${config.wp.appPassword}`).toString('base64');
-  const targetOccurrence = occurrence || 2; // デフォルトは2番目（重複の方）を削除
+  const targetOccurrence = occurrence || 2;
 
   try {
     const getRes = await fetch(`${config.wp.restBase}/posts/${postId}?context=edit`, {
@@ -537,40 +544,60 @@ app.post('/api/audit/remove-cta', async (req, res) => {
     // バックアップ
     await store.saveBackup(postId, originalContent);
 
-    // 正規表現でマッチするCTAブロックを全て検出
-    // partner キーは category により "company" or "exchange"
-    const entityPattern = `(?:"company"|"exchange")\\s*:\\s*"${escapeRegex(partner)}"`;
-    const blockPattern = `<!-- wp:soico-cta\\/[a-z-]+\\s+\\{[^}]*${entityPattern}[^}]*\\}\\s*\\/-->`;
-    const regex = new RegExp(blockPattern, 'g');
-
-    // featureText が指定されている場合、さらに絞り込み
-    const matches = [];
-    let m;
-    while ((m = regex.exec(originalContent)) !== null) {
-      if (featureText) {
-        // featureText が含まれるブロックのみ
-        if (m[0].includes(`"featureText":"${featureText}"`) || m[0].includes(`"featureText": "${featureText}"`)) {
-          matches.push({ index: m.index, length: m[0].length, text: m[0] });
-        }
-      } else {
-        matches.push({ index: m.index, length: m[0].length, text: m[0] });
-      }
+    // H2見出しを全抽出してセクション範囲を特定
+    const h2Regex = /<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h2[^>]*>([\s\S]*?)<\/h2>\s*<!-- \/wp:heading -->/gi;
+    const headings = [];
+    let hm;
+    while ((hm = h2Regex.exec(originalContent)) !== null) {
+      headings.push({
+        text: hm[1].replace(/<[^>]+>/g, '').trim(),
+        start: hm.index,
+        end: hm.index + hm[0].length,
+      });
     }
 
-    if (matches.length === 0) {
-      return res.status(404).json({ error: `partner="${partner}" のCTAブロックが見つかりません` });
+    // 対象セクションを特定
+    const targetIdx = headings.findIndex(h =>
+      h.text === sectionHeading || h.text.includes(sectionHeading) || sectionHeading.includes(h.text)
+    );
+    if (targetIdx === -1) {
+      return res.status(404).json({ error: `見出し「${sectionHeading}」が見つかりません` });
+    }
+
+    const sectionStart = headings[targetIdx].end;
+    const sectionEnd = targetIdx + 1 < headings.length ? headings[targetIdx + 1].start : originalContent.length;
+    const sectionContent = originalContent.substring(sectionStart, sectionEnd);
+
+    // セクション内の soico-cta ブロックを全検索
+    const ctaRegex = /<!-- wp:soico-cta\/[a-z-]+\s+\{[^}]*\}\s*\/-->/g;
+    const matches = [];
+    let cm;
+    while ((cm = ctaRegex.exec(sectionContent)) !== null) {
+      // partner でフィルタ（指定されている場合）
+      if (partner) {
+        const hasPartner = cm[0].includes(`"${partner}"`) || cm[0].includes(`"company":"${partner}"`) || cm[0].includes(`"exchange":"${partner}"`);
+        if (!hasPartner) continue;
+      }
+      matches.push({
+        localIndex: cm.index,
+        globalIndex: sectionStart + cm.index,
+        length: cm[0].length,
+        text: cm[0],
+      });
+    }
+
+    if (matches.length < 2) {
+      return res.status(400).json({ error: `セクション内にCTAが${matches.length}個しかありません（重複なし）` });
     }
 
     if (targetOccurrence > matches.length) {
-      return res.status(404).json({ error: `${matches.length}個しか見つかりません（${targetOccurrence}番目を指定）` });
+      return res.status(404).json({ error: `セクション内に${matches.length}個のCTA（${targetOccurrence}番目は存在しない）` });
     }
 
-    // N番目のマッチを削除
+    // セクション内 N 番目を削除
     const target = matches[targetOccurrence - 1];
-
-    // 前後の空行も削除
-    let removeStart = target.index;
-    let removeEnd = target.index + target.length;
+    let removeStart = target.globalIndex;
+    let removeEnd = target.globalIndex + target.length;
     while (removeStart > 0 && originalContent[removeStart - 1] === '\n') removeStart--;
     while (removeEnd < originalContent.length && originalContent[removeEnd] === '\n') removeEnd++;
 
@@ -588,12 +615,13 @@ app.post('/api/audit/remove-cta', async (req, res) => {
         title: postData.title.raw,
         url: postData.link,
         action: 'remove-cta',
+        sectionHeading,
         removedBlock: target.text.substring(0, 100),
-        partner,
+        partner: partner || '(all)',
         occurrence: targetOccurrence,
-        totalFound: matches.length,
+        totalInSection: matches.length,
       });
-      res.json({ success: true, removed: target.text.substring(0, 100), totalFound: matches.length });
+      res.json({ success: true, removed: target.text.substring(0, 100), totalInSection: matches.length });
     } else {
       res.status(500).json({ error: `POST ${putRes.status}` });
     }
@@ -601,10 +629,6 @@ app.post('/api/audit/remove-cta', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // Partner DB — CRUD
 app.get('/api/partners', async (req, res) => {

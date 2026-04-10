@@ -352,18 +352,18 @@ function AuditView({ showToast }) {
     setLoading(false);
   };
 
-  const handleRemove = async (postId, block, occurrence) => {
+  const handleRemove = async (dup, block, occurrence) => {
     if (!confirm('このCTAブロックを削除しますか？（バックアップは自動保存されます）')) return;
     try {
-      await api.removeCta(postId, {
-        blockType: block.blockType,
+      await api.removeCta(dup.postId, {
         partner: block.partner,
         featureText: block.featureText,
+        sectionHeading: dup.heading,
         occurrence: occurrence,
       });
       // UIから除去
       setDuplicates(prev => prev.map(d => {
-        if (d.postId === postId && d.ctaBlocks) {
+        if (d.postId === dup.postId && d.heading === dup.heading && d.ctaBlocks) {
           const newBlocks = [...d.ctaBlocks];
           newBlocks.splice(occurrence - 1, 1);
           return { ...d, ctaBlocks: newBlocks, ctaCount: newBlocks.length };
@@ -417,7 +417,7 @@ function AuditView({ showToast }) {
               {block.featureText && <div className="result-reason">「{block.featureText}」</div>}
               <div className="result-actions">
                 {bi > 0 && (
-                  <button className="btn-reject btn-small" onClick={() => handleRemove(d.postId, block, bi + 1)}>
+                  <button className="btn-reject btn-small" onClick={() => handleRemove(d, block, bi + 1)}>
                     このCTAを削除
                   </button>
                 )}
