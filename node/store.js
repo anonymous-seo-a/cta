@@ -40,42 +40,65 @@ async function saveResults(results) {
   await writeJSON(RESULTS_FILE, results);
 }
 
+// ファイルロック（同時書き込み防止）
+let writeLock = Promise.resolve();
+
+async function withLock(fn) {
+  const prev = writeLock;
+  let resolve;
+  writeLock = new Promise(r => { resolve = r; });
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    resolve();
+  }
+}
+
 async function addResults(newResults) {
-  const existing = await getResults();
-  // 重複排除（同じ postId + heading の組み合わせ）
-  const key = r => `${r.postId}:${r.heading}`;
-  const existingKeys = new Set(existing.map(key));
-  const deduped = newResults.filter(r => !existingKeys.has(key(r)));
+  return withLock(async () => {
+    const existing = await getResults();
+    const key = r => `${r.postId}:${r.heading}`;
+    const existingKeys = new Set(existing.map(key));
+    const deduped = newResults.filter(r => !existingKeys.has(key(r)));
 
-  const merged = [...existing, ...deduped.map(r => ({
-    ...r,
-    id: `${r.postId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    status: 'pending', // pending / approved / rejected / applied
-    createdAt: new Date().toISOString(),
-    appliedAt: null,
-  }))];
+    if (deduped.length === 0) return existing;
 
-  await saveResults(merged);
-  return merged;
+    const newItems = deduped.map(r => ({
+      ...r,
+      id: `${r.postId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      appliedAt: null,
+    }));
+
+    const merged = [...existing, ...newItems];
+    await saveResults(merged);
+    return merged;
+  });
 }
 
 async function updateResult(id, updates) {
-  const results = await getResults();
-  const idx = results.findIndex(r => r.id === id);
-  if (idx === -1) return null;
-  results[idx] = { ...results[idx], ...updates };
-  await saveResults(results);
-  return results[idx];
+  return withLock(async () => {
+    const results = await getResults();
+    const idx = results.findIndex(r => r.id === id);
+    if (idx === -1) return null;
+    results[idx] = { ...results[idx], ...updates };
+    await saveResults(results);
+    return results[idx];
+  });
 }
 
 async function bulkUpdateStatus(ids, status) {
-  const results = await getResults();
-  const idSet = new Set(ids);
-  for (const r of results) {
-    if (idSet.has(r.id)) r.status = status;
-  }
-  await saveResults(results);
-  return results;
+  return withLock(async () => {
+    const results = await getResults();
+    const idSet = new Set(ids);
+    for (const r of results) {
+      if (idSet.has(r.id)) r.status = status;
+    }
+    await saveResults(results);
+    return results;
+  });
 }
 
 // ============================================================
