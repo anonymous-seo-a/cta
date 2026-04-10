@@ -16,3 +16,7 @@ Thumbs.db
 
 # Node
 node_modules/
+
+# Google service account key (never commit)
+service-account-key.json
+*-key.json

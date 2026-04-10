@@ -46,6 +46,10 @@ export const api = {
   removeAllDuplicates: (duplicates) =>
     request('/api/audit/remove-all-duplicates', { method: 'POST', body: JSON.stringify({ duplicates }) }),
 
+  getScoring: () => request('/api/scoring'),
+  refreshScoring: () => request('/api/scoring/refresh', { method: 'POST' }),
+  getScoringStatus: () => request('/api/scoring/status'),
+
   getAllPartners: () => request('/api/partners'),
 
   updatePartner: (category, slug, data) =>

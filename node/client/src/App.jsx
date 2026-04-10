@@ -334,6 +334,169 @@ function PartnerManager({ showToast }) {
   );
 }
 
+function ArticlesView({ showToast, onRunGapFill }) {
+  const [scoring, setScoring] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [filterCategory, setFilterCategory] = useState('all');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const perPage = 50;
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getScoring();
+      setScoring(data);
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setLoading(false);
+  }, [showToast]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  // スコア更新中のポーリング
+  useEffect(() => {
+    if (!refreshing) return;
+    const interval = setInterval(async () => {
+      const s = await api.getScoringStatus();
+      if (!s.running) {
+        setRefreshing(false);
+        clearInterval(interval);
+        await loadData();
+        showToast('スコア更新完了');
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [refreshing, loadData, showToast]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await api.refreshScoring();
+      showToast('スコア更新開始...');
+    } catch (e) {
+      showToast(e.message, 'error');
+      setRefreshing(false);
+    }
+  };
+
+  const detectCategory = (url) => {
+    if (url.includes('/cardloan/') || url.includes('/caching/')) return 'cardloan';
+    if (url.includes('/cryptocurrency/')) return 'cryptocurrency';
+    if (url.includes('/securities/')) return 'securities';
+    if (url.includes('/fx/')) return 'fx';
+    return 'other';
+  };
+
+  const extractPostId = (url) => {
+    const m = url.match(/\/(\d+)\/?$/);
+    return m ? m[1] : '';
+  };
+
+  const articles = (scoring?.articles || []).filter(a => {
+    const cat = detectCategory(a.fullUrl);
+    if (filterCategory !== 'all' && cat !== filterCategory) return false;
+    if (search && !a.fullUrl.toLowerCase().includes(search.toLowerCase()) && !a.path.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const pageArticles = articles.slice(page * perPage, (page + 1) * perPage);
+  const totalPages = Math.ceil(articles.length / perPage);
+
+  const categoryLabel = { cardloan: 'ローン', cryptocurrency: '暗号資産', securities: '証券', fx: 'FX', other: '他' };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="btn-apply" onClick={handleRefresh} disabled={refreshing}>
+          {refreshing ? 'スコア更新中...' : 'スコア更新'}
+        </button>
+        {scoring?.updatedAt && (
+          <span style={{ fontSize: 12, color: '#888' }}>最終更新: {new Date(scoring.updatedAt).toLocaleString('ja-JP')}</span>
+        )}
+        <span style={{ fontSize: 12, color: '#888' }}>{articles.length}件</span>
+      </div>
+
+      <div className="filters">
+        <select value={filterCategory} onChange={e => { setFilterCategory(e.target.value); setPage(0); }}>
+          <option value="all">全カテゴリ</option>
+          <option value="securities">証券</option>
+          <option value="cardloan">カードローン</option>
+          <option value="cryptocurrency">暗号資産</option>
+          <option value="fx">FX</option>
+        </select>
+        <input placeholder="URL検索..." value={search} onChange={e => { setSearch(e.target.value); setPage(0); }} style={{ maxWidth: 250 }} />
+      </div>
+
+      {loading ? (
+        <div className="loading"><div className="spinner" /> 読み込み中...</div>
+      ) : !scoring?.articles ? (
+        <div className="loading">データなし。「スコア更新」ボタンでGA4/GSCからデータを取得してください。</div>
+      ) : (
+        <>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', background: 'white', borderRadius: 10, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: '#f8f9fa', borderBottom: '2px solid #eee' }}>
+                  <th style={{ padding: '10px 12px', textAlign: 'left' }}>#</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'left' }}>カテゴリ</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'left' }}>記事URL</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>PV(imps)</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>クリック</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>順位</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>Aff Click</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700 }}>スコア</th>
+                  <th style={{ padding: '10px 12px', textAlign: 'center' }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageArticles.map((a, i) => {
+                  const cat = detectCategory(a.fullUrl);
+                  const postId = extractPostId(a.fullUrl);
+                  const rank = page * perPage + i + 1;
+                  return (
+                    <tr key={a.path} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                      <td style={{ padding: '8px 12px', color: '#888' }}>{rank}</td>
+                      <td style={{ padding: '8px 12px' }}>
+                        <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: cat === 'securities' ? '#e3f2fd' : cat === 'cardloan' ? '#fce4ec' : cat === 'cryptocurrency' ? '#fff3e0' : '#f5f5f5' }}>
+                          {categoryLabel[cat] || cat}
+                        </span>
+                      </td>
+                      <td style={{ padding: '8px 12px', maxWidth: 350, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <a href={a.fullUrl} target="_blank" rel="noopener" style={{ fontSize: 12 }}>{a.path}</a>
+                      </td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right' }}>{a.impressions.toLocaleString()}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right' }}>{a.gscClicks}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right' }}>{a.position}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', color: a.affiliateClicks > 0 ? '#2e7d32' : '#ccc' }}>{a.affiliateClicks}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, fontSize: 14 }}>{a.score}</td>
+                      <td style={{ padding: '8px 12px', textAlign: 'center' }}>
+                        {['cardloan', 'cryptocurrency', 'securities'].includes(cat) && postId && (
+                          <button className="btn-apply btn-small" onClick={() => onRunGapFill([postId])}>Gap Fill</button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16 }}>
+              <button className="btn-secondary btn-small" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}>前</button>
+              <span style={{ fontSize: 13, padding: '6px 12px' }}>{page + 1} / {totalPages}</span>
+              <button className="btn-secondary btn-small" onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}>次</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function AuditView({ showToast }) {
   const [duplicates, setDuplicates] = useState([]);
   const [totalRemovable, setTotalRemovable] = useState(0);
@@ -706,6 +869,7 @@ export default function App() {
       <div className="header">
         <h1>CTA Gap Fill Manager</h1>
         <div className="header-nav">
+          <button className={page === 'articles' ? 'active' : ''} onClick={() => setPage('articles')}>記事</button>
           <button className={page === 'review' ? 'active' : ''} onClick={() => setPage('review')}>承認</button>
           <button className={page === 'history' ? 'active' : ''} onClick={() => setPage('history')}>履歴</button>
           <button className={page === 'audit' ? 'active' : ''} onClick={() => setPage('audit')}>監査</button>
@@ -785,6 +949,8 @@ export default function App() {
         )}
 
         {page === 'history' && <HistoryView history={history} onRollback={handleRollback} />}
+
+        {page === 'articles' && <ArticlesView showToast={showToast} onRunGapFill={async (ids) => { await handleRun(ids); setPage('review'); }} />}
 
         {page === 'audit' && <AuditView showToast={showToast} />}
 

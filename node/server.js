@@ -848,6 +848,37 @@ app.delete('/api/partners/:category/:slug', async (req, res) => {
   res.json({ success: true });
 });
 
+// ============================================================
+// スコアリング: GA4 + GSC → 改善優先度スコア
+// ============================================================
+const { runScoring } = require('./scoring');
+let scoringCache = { data: null, updatedAt: null, running: false };
+
+app.get('/api/scoring', (req, res) => {
+  if (!scoringCache.data) return res.json({ articles: [], updatedAt: null });
+  res.json({ articles: scoringCache.data, updatedAt: scoringCache.updatedAt });
+});
+
+app.post('/api/scoring/refresh', async (req, res) => {
+  if (scoringCache.running) return res.status(409).json({ error: '更新中です' });
+  scoringCache.running = true;
+  res.json({ started: true });
+
+  try {
+    const articles = await runScoring();
+    scoringCache.data = articles;
+    scoringCache.updatedAt = new Date().toISOString();
+  } catch (e) {
+    console.error('Scoring error:', e.message);
+  } finally {
+    scoringCache.running = false;
+  }
+});
+
+app.get('/api/scoring/status', (req, res) => {
+  res.json({ running: scoringCache.running, updatedAt: scoringCache.updatedAt, count: scoringCache.data?.length || 0 });
+});
+
 // React SPA フォールバック
 app.get('/{0,}', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/dist/index.html'));
