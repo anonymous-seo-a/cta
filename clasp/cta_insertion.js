@@ -94,7 +94,7 @@ function generateCtaInsertionPlan() {
 
     Logger.log(`--- 挿入計画生成: ${url} (ID: ${postId}, cat: ${category}) ---`);
 
-    const changes = parsePlanAChanges(planAText);
+    const changes = parsePlanAChanges(planAText, category);
     if (changes.length === 0) {
       Logger.log('変更箇所の解析に失敗');
       continue;
@@ -337,8 +337,20 @@ function updateWpPost(postId, newContent) {
 
 // ============================================================
 // Plan Aテキストをパース
+//
+// formatPlan() の出力形式:
+//   ・<location>: <proposed>（理由: ...）
+//     → 推奨案件: <slug>
+//
+// partnerSlug が空の場合はカテゴリデフォルト案件にフォールバック
 // ============================================================
-function parsePlanAChanges(planAText) {
+const CATEGORY_DEFAULT_PARTNER = {
+  'cardloan': 'aiful',
+  'cryptocurrency': 'gmo-coin',
+  'securities': 'sbi',
+};
+
+function parsePlanAChanges(planAText, category) {
   const changes = [];
   const lines = planAText.split('\n');
   let currentChange = null;
@@ -364,6 +376,16 @@ function parsePlanAChanges(planAText) {
     }
   }
   if (currentChange) changes.push(currentChange);
+
+  // S2: partnerSlug が空の change にカテゴリデフォルト案件を割当
+  const fallbackSlug = CATEGORY_DEFAULT_PARTNER[category] || '';
+  for (const change of changes) {
+    if (!change.partnerSlug && fallbackSlug) {
+      change.partnerSlug = fallbackSlug;
+      Logger.log(`  パートナー未指定のためデフォルト割当: ${change.location} → ${fallbackSlug}`);
+    }
+  }
+
   return changes;
 }
 
@@ -454,6 +476,8 @@ function extractAllHeadings(content) {
 // ============================================================
 // 見出しマッチング: 最も一致度の高い見出しを返す
 // positionはセクション末尾の最終段落直後を返す
+//
+// S3改善: 閾値 0.4→0.3 に緩和 + 部分文字列マッチを追加
 // ============================================================
 function findBestHeadingMatch(content, locationText) {
   const keywords = extractLocationKeywords(locationText);
@@ -466,8 +490,12 @@ function findBestHeadingMatch(content, locationText) {
   let bestScore = 0;
   let bestIndex = -1;
 
+  // location テキストからタグ・記号を除去した正規化テキスト
+  const normalizedLocation = locationText.replace(/[「」『』（）()？?！!｜|]/g, '').trim();
+
   for (let i = 0; i < headings.length; i++) {
     const heading = headings[i];
+    const normalizedHeading = heading.text.replace(/[「」『』（）()？?！!｜|]/g, '').trim();
 
     // 完全一致
     if (heading.text === locationText || heading.text.includes(locationText)) {
@@ -477,11 +505,24 @@ function findBestHeadingMatch(content, locationText) {
       break;
     }
 
-    // キーワードマッチング
+    // 部分文字列マッチ（正規化後）: location が見出しに含まれる or 見出しが location に含まれる
+    if (normalizedLocation.length >= 4 && normalizedHeading.length >= 4) {
+      if (normalizedHeading.includes(normalizedLocation) || normalizedLocation.includes(normalizedHeading)) {
+        const substringScore = 0.8;
+        if (substringScore > bestScore) {
+          bestScore = substringScore;
+          bestMatch = heading;
+          bestIndex = i;
+          continue;
+        }
+      }
+    }
+
+    // キーワードマッチング（閾値 0.3 に緩和）
     const matchCount = keywords.filter(kw => heading.text.includes(kw)).length;
     const score = keywords.length > 0 ? matchCount / keywords.length : 0;
 
-    if (score > bestScore && score >= 0.4) {
+    if (score > bestScore && score >= 0.3) {
       bestScore = score;
       bestMatch = heading;
       bestIndex = i;
