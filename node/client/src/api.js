@@ -18,6 +18,10 @@ export const api = {
   runGapFill: (postIds) =>
     request('/api/gap-fill/run', { method: 'POST', body: JSON.stringify({ postIds }) }),
 
+  getGapFillStatus: () => request('/api/gap-fill/status'),
+
+  stopGapFill: () => request('/api/gap-fill/stop', { method: 'POST' }),
+
   updateResult: (id, updates) =>
     request(`/api/results/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
 

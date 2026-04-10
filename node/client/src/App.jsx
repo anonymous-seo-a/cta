@@ -334,38 +334,98 @@ function PartnerManager({ showToast }) {
   );
 }
 
-function RunModal({ onClose, onRun }) {
+function RunModal({ onClose, onRun, onStop }) {
   const [postIds, setPostIds] = useState('');
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
+  const [started, setStarted] = useState(false);
+  const [status, setStatus] = useState(null);
 
   const handleRun = async () => {
-    setRunning(true);
     const ids = postIds.trim() ? postIds.split(/[,\s]+/).filter(Boolean) : undefined;
-    const res = await onRun(ids);
-    setResult(res);
-    setRunning(false);
+    await onRun(ids);
+    setStarted(true);
+  };
+
+  // 進捗ポーリング
+  useEffect(() => {
+    if (!started) return;
+    const interval = setInterval(async () => {
+      try {
+        const s = await api.getGapFillStatus();
+        setStatus(s);
+        if (!s.running && s.progress?.phase !== 'fetching') {
+          clearInterval(interval);
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [started]);
+
+  const p = status?.progress;
+  const phaseLabel = {
+    fetching: '記事データ取得中...',
+    processing: '処理中...',
+    done: '完了',
+    stopped: '停止済み',
+    error: 'エラー',
   };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h2>Gap Fill 実行</h2>
-        <p style={{ fontSize: 14, color: '#666', marginBottom: 12 }}>
-          記事IDを指定（カンマ区切り）。空欄で全記事対象。
-        </p>
-        <input placeholder="例: 5286, 18924, 6504" value={postIds} onChange={e => setPostIds(e.target.value)} disabled={running} />
-        {result && (
-          <p style={{ marginTop: 12, color: '#2e7d32', fontWeight: 500 }}>
-            {result.added}件の挿入候補を追加（合計: {result.total}件）
-          </p>
+        {!started ? (
+          <>
+            <p style={{ fontSize: 14, color: '#666', marginBottom: 12 }}>
+              記事IDを指定（カンマ区切り）。空欄で全記事対象。
+            </p>
+            <input placeholder="例: 5286, 18924, 6504" value={postIds} onChange={e => setPostIds(e.target.value)} />
+            <div className="actions">
+              <button className="btn-secondary" onClick={onClose}>閉じる</button>
+              <button className="btn-apply" onClick={handleRun}>実行</button>
+            </div>
+          </>
+        ) : (
+          <>
+            {p && (
+              <div style={{ fontSize: 14 }}>
+                <div style={{ marginBottom: 8, fontWeight: 600 }}>{phaseLabel[p.phase] || p.phase}</div>
+
+                {p.phase === 'fetching' && (
+                  <div>取得済み: {p.fetched}件</div>
+                )}
+
+                {(p.phase === 'processing' || p.phase === 'done' || p.phase === 'stopped') && (
+                  <>
+                    <div style={{ background: '#e0e0e0', borderRadius: 4, height: 8, marginBottom: 8 }}>
+                      <div style={{ background: '#1565c0', borderRadius: 4, height: 8, width: `${p.total > 0 ? (p.processed / p.total * 100) : 0}%`, transition: 'width 0.5s' }} />
+                    </div>
+                    <div>{p.processed} / {p.total} 記事処理済み</div>
+                    <div>挿入候補: {p.added}件</div>
+                    {p.errors > 0 && <div style={{ color: '#c62828' }}>エラー: {p.errors}件</div>}
+                    {p.currentArticle && p.phase === 'processing' && (
+                      <div style={{ color: '#888', marginTop: 4, fontSize: 12 }}>現在: {p.currentArticle}</div>
+                    )}
+                  </>
+                )}
+
+                {p.phase === 'error' && (
+                  <div style={{ color: '#c62828' }}>{p.error}</div>
+                )}
+              </div>
+            )}
+            <div className="actions" style={{ marginTop: 16 }}>
+              {status?.running && <button className="btn-reject" onClick={onStop}>停止</button>}
+              <button className="btn-secondary" onClick={onClose}>
+                {status?.running ? 'バックグラウンドで継続' : '閉じる'}
+              </button>
+            </div>
+            {status?.running && (
+              <p style={{ fontSize: 12, color: '#888', marginTop: 8 }}>
+                モーダルを閉じても処理は継続します。承認タブで結果をリアルタイム確認できます。
+              </p>
+            )}
+          </>
         )}
-        <div className="actions">
-          <button className="btn-secondary" onClick={onClose}>閉じる</button>
-          <button className="btn-apply" onClick={handleRun} disabled={running}>
-            {running ? '処理中...' : '実行'}
-          </button>
-        </div>
       </div>
     </div>
   );
@@ -400,6 +460,25 @@ export default function App() {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // ジョブ実行中は5秒おきに自動リフレッシュ
+  useEffect(() => {
+    let interval;
+    const poll = async () => {
+      try {
+        const s = await api.getGapFillStatus();
+        if (s.running) {
+          await refresh();
+        } else if (interval) {
+          clearInterval(interval);
+          interval = null;
+          await refresh();
+        }
+      } catch {}
+    };
+    interval = setInterval(poll, 5000);
+    return () => { if (interval) clearInterval(interval); };
+  }, [refresh]);
 
   const handleUpdate = async (id, updates) => {
     try {
@@ -564,7 +643,7 @@ export default function App() {
         {page === 'partners' && <PartnerManager showToast={showToast} />}
       </div>
 
-      {showRunModal && <RunModal onClose={() => setShowRunModal(false)} onRun={handleRun} />}
+      {showRunModal && <RunModal onClose={() => setShowRunModal(false)} onRun={handleRun} onStop={async () => { try { await api.stopGapFill(); showToast('停止リクエスト送信'); } catch (e) { showToast(e.message, 'error'); } }} />}
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
     </>
   );

@@ -181,57 +181,135 @@ app.get('/api/results', async (req, res) => {
   res.json(results);
 });
 
-// Gap Fill 実行
-app.post('/api/gap-fill/run', async (req, res) => {
-  const { postIds } = req.body;
-  try {
-    const articles = await fetchArticlesFromPHP(postIds);
-    const targets = articles.filter(a => config.supportedCategories.includes(a.category));
+// Gap Fill ジョブ状態
+let gapFillJob = { running: false, progress: null };
 
-    const allPlans = [];
-    for (const post of targets) {
+// Gap Fill 進捗取得
+app.get('/api/gap-fill/status', (req, res) => {
+  res.json(gapFillJob);
+});
+
+// Gap Fill 停止
+app.post('/api/gap-fill/stop', (req, res) => {
+  if (gapFillJob.running) {
+    gapFillJob.stopRequested = true;
+    res.json({ message: '停止リクエスト送信' });
+  } else {
+    res.json({ message: '実行中のジョブなし' });
+  }
+});
+
+// Gap Fill 実行（バックグラウンド・1記事ずつ即保存）
+app.post('/api/gap-fill/run', async (req, res) => {
+  if (gapFillJob.running) {
+    return res.status(409).json({ error: '既に実行中です' });
+  }
+
+  const { postIds } = req.body;
+  gapFillJob = { running: true, stopRequested: false, progress: { phase: 'fetching', fetched: 0, total: 0, processed: 0, added: 0, errors: 0, currentArticle: '' } };
+
+  // 即座にレスポンス返却（バックグラウンド実行）
+  res.json({ started: true, message: 'バックグラウンドで実行開始' });
+
+  // バックグラウンドで処理
+  try {
+    // PHP からバッチ取得（進捗更新しながら）
+    let articles = [];
+    if (postIds && postIds.length > 0) {
+      const params = new URLSearchParams({ token: config.site.phpToken, post_ids: postIds.join(',') });
+      const r = await fetch(`${config.site.url}/gap_fill_prepare.php?${params}`);
+      if (r.ok) articles = (await r.json()).posts || [];
+      gapFillJob.progress.fetched = articles.length;
+    } else {
+      let offset = 0;
+      while (!gapFillJob.stopRequested) {
+        const params = new URLSearchParams({ token: config.site.phpToken, limit: String(BATCH_SIZE), offset: String(offset) });
+        const r = await fetch(`${config.site.url}/gap_fill_prepare.php?${params}`);
+        if (!r.ok) break;
+        const data = await r.json();
+        if (!data.posts || data.posts.length === 0) break;
+        articles.push(...data.posts);
+        gapFillJob.progress.fetched = articles.length;
+        gapFillJob.progress.phase = 'fetching';
+        if (data.posts.length < BATCH_SIZE) break;
+        offset += BATCH_SIZE;
+      }
+    }
+
+    const targets = articles.filter(a => config.supportedCategories.includes(a.category));
+    gapFillJob.progress.total = targets.length;
+    gapFillJob.progress.phase = 'processing';
+
+    for (let i = 0; i < targets.length; i++) {
+      if (gapFillJob.stopRequested) {
+        gapFillJob.progress.phase = 'stopped';
+        break;
+      }
+
+      const post = targets[i];
+      gapFillJob.progress.processed = i;
+      gapFillJob.progress.currentArticle = post.title;
+
       const gapCount = post.sections.filter(s => !s.hasCta).length;
       if (gapCount === 0) continue;
 
-      const diagnosis = await callGapFillDiagnosis(post);
-      if (!diagnosis) continue;
+      try {
+        const diagnosis = await callGapFillDiagnosis(post);
+        if (!diagnosis) { gapFillJob.progress.errors++; continue; }
 
-      const priority = config.partnerPriority[post.category] || [];
-      let pidx = 0;
+        const partnerDB = await loadPartnerDB();
+        const partners = partnerDB[post.category] || [];
+        const prioritySlugs = partners.sort((a, b) => (a.priority || 99) - (b.priority || 99)).map(p => p.slug);
+        let pidx = 0;
 
-      for (const item of diagnosis) {
-        if (!item || item.intent === 'low' || item.intent === 'skip') continue;
-        const section = post.sections.find(s => s.index === item.section);
-        if (!section || section.hasCta) continue;
+        const articlePlans = [];
+        for (const item of diagnosis) {
+          if (!item || item.intent === 'low' || item.intent === 'skip') continue;
+          const section = post.sections.find(s => s.index === item.section);
+          if (!section || section.hasCta) continue;
 
-        let slug = item.partner;
-        if (!slug || !priority.includes(slug)) { slug = priority[pidx % priority.length]; pidx++; }
-        else { const i = priority.indexOf(slug); if (i >= 0) pidx = i + 1; }
+          let slug = item.partner;
+          if (!slug || !prioritySlugs.includes(slug)) { slug = prioritySlugs[pidx % prioritySlugs.length]; pidx++; }
+          else { const idx = prioritySlugs.indexOf(slug); if (idx >= 0) pidx = idx + 1; }
 
-        const pluginSlug = config.partnerSlugMap[slug] || slug.replace(/-/g, '_');
-        const featureText = (item.featureText || '').trim();
+          const pluginSlug = config.partnerSlugMap[slug] || slug.replace(/-/g, '_');
+          const featureText = (item.featureText || '').trim();
 
-        allPlans.push({
-          postId: post.id,
-          url: post.url,
-          title: post.title,
-          category: post.category,
-          heading: section.heading,
-          intent: item.intent,
-          partner: pluginSlug,
-          featureText,
-          reason: item.reason || '',
-          ctaBlock: buildCtaBlock(post.category, pluginSlug, featureText),
-          sections: post.sections,
-        });
+          articlePlans.push({
+            postId: post.id,
+            url: post.url,
+            title: post.title,
+            category: post.category,
+            heading: section.heading,
+            intent: item.intent,
+            partner: pluginSlug,
+            featureText,
+            reason: item.reason || '',
+            ctaBlock: buildCtaBlock(post.category, pluginSlug, featureText),
+            sections: post.sections,
+          });
+        }
+
+        // 1記事分を即保存（フロントで即時表示される）
+        if (articlePlans.length > 0) {
+          await store.addResults(articlePlans);
+          gapFillJob.progress.added += articlePlans.length;
+        }
+      } catch (e) {
+        gapFillJob.progress.errors++;
+        console.error(`Gap Fill error [${post.id}]: ${e.message}`);
       }
+
       await new Promise(r => setTimeout(r, 500));
     }
 
-    const saved = await store.addResults(allPlans);
-    res.json({ added: allPlans.length, total: saved.length });
+    gapFillJob.progress.processed = targets.length;
+    if (gapFillJob.progress.phase !== 'stopped') gapFillJob.progress.phase = 'done';
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    gapFillJob.progress = { ...gapFillJob.progress, phase: 'error', error: e.message };
+    console.error('Gap Fill fatal:', e.message);
+  } finally {
+    gapFillJob.running = false;
   }
 });
 
