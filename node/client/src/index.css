@@ -82,6 +82,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #1565c0
 .modal h2 { font-size: 18px; margin-bottom: 16px; }
 .modal .actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
 
+textarea { border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; font-size: 14px; width: 100%; font-family: inherit; resize: vertical; }
+textarea:focus { outline: none; border-color: #1565c0; box-shadow: 0 0 0 2px rgba(21,101,192,0.1); }
+
+.partner-editor { display: flex; flex-direction: column; gap: 10px; }
+
 .loading { text-align: center; padding: 40px; color: #888; }
 .spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid #ddd; border-top-color: #1565c0; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -162,6 +162,178 @@ function HistoryView({ history, onRollback }) {
   );
 }
 
+function PartnerEditor({ partner, category, onSave, onCancel, onDelete }) {
+  const [form, setForm] = useState({
+    slug: partner?.slug || '',
+    name: partner?.name || '',
+    features: partner?.features?.join('\n') || '',
+    bestFor: partner?.bestFor?.join('\n') || '',
+    caution: partner?.caution || '',
+    priority: partner?.priority || 99,
+  });
+  const isNew = !partner;
+
+  const handleSubmit = () => {
+    onSave(category, form.slug, {
+      slug: form.slug,
+      name: form.name,
+      features: form.features.split('\n').map(s => s.trim()).filter(Boolean),
+      bestFor: form.bestFor.split('\n').map(s => s.trim()).filter(Boolean),
+      caution: form.caution,
+      priority: Number(form.priority),
+    });
+  };
+
+  return (
+    <div className="partner-editor">
+      <div className="result-field">
+        <label>slug</label>
+        <input value={form.slug} onChange={e => setForm({ ...form, slug: e.target.value })} disabled={!isNew} placeholder="例: rakuten" />
+      </div>
+      <div className="result-field">
+        <label>名称</label>
+        <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="例: 楽天証券" />
+      </div>
+      <div className="result-field" style={{ alignItems: 'flex-start' }}>
+        <label>特徴・強み</label>
+        <textarea rows={4} value={form.features} onChange={e => setForm({ ...form, features: e.target.value })} placeholder="1行に1つずつ入力" />
+      </div>
+      <div className="result-field" style={{ alignItems: 'flex-start' }}>
+        <label>向いている文脈</label>
+        <textarea rows={4} value={form.bestFor} onChange={e => setForm({ ...form, bestFor: e.target.value })} placeholder="1行に1つずつ入力" />
+      </div>
+      <div className="result-field">
+        <label>注意点</label>
+        <input value={form.caution} onChange={e => setForm({ ...form, caution: e.target.value })} />
+      </div>
+      <div className="result-field">
+        <label>優先順位</label>
+        <input type="number" value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })} style={{ width: 80 }} />
+      </div>
+      <div className="result-actions">
+        <button className="btn-approve btn-small" onClick={handleSubmit}>{isNew ? '追加' : '保存'}</button>
+        <button className="btn-secondary btn-small" onClick={onCancel}>キャンセル</button>
+        {!isNew && onDelete && (
+          <button className="btn-reject btn-small" onClick={() => { if (confirm(`${form.name} を削除しますか？`)) onDelete(category, form.slug); }}>削除</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PartnerManager({ showToast }) {
+  const [partnerDB, setPartnerDB] = useState(null);
+  const [activeCategory, setActiveCategory] = useState('securities');
+  const [editingSlug, setEditingSlug] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const categories = [
+    { key: 'securities', label: '証券' },
+    { key: 'cardloan', label: 'カードローン' },
+    { key: 'cryptocurrency', label: '暗号資産' },
+  ];
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const db = await api.getAllPartners();
+      setPartnerDB(db);
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setLoading(false);
+  }, [showToast]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleSave = async (category, slug, data) => {
+    try {
+      await api.updatePartner(category, slug, data);
+      await refresh();
+      setEditingSlug(null);
+      setAdding(false);
+      showToast('保存しました');
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  };
+
+  const handleDelete = async (category, slug) => {
+    try {
+      await api.deletePartner(category, slug);
+      await refresh();
+      setEditingSlug(null);
+      showToast('削除しました');
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  };
+
+  if (loading || !partnerDB) return <div className="loading"><div className="spinner" /> 読み込み中...</div>;
+
+  const partners = (partnerDB[activeCategory] || []).sort((a, b) => (a.priority || 99) - (b.priority || 99));
+
+  return (
+    <div>
+      <div className="filters" style={{ marginBottom: 16 }}>
+        {categories.map(c => (
+          <button key={c.key}
+            className={activeCategory === c.key ? 'btn-apply btn-small' : 'btn-secondary btn-small'}
+            onClick={() => { setActiveCategory(c.key); setEditingSlug(null); setAdding(false); }}>
+            {c.label} ({(partnerDB[c.key] || []).length})
+          </button>
+        ))}
+        <button className="btn-approve btn-small" onClick={() => { setAdding(true); setEditingSlug(null); }} style={{ marginLeft: 'auto' }}>
+          + 新規追加
+        </button>
+      </div>
+
+      {adding && (
+        <div className="article-group" style={{ marginBottom: 16 }}>
+          <div className="article-header"><div className="article-title">新規追加</div></div>
+          <div style={{ padding: 16 }}>
+            <PartnerEditor category={activeCategory} onSave={handleSave} onCancel={() => setAdding(false)} />
+          </div>
+        </div>
+      )}
+
+      {partners.map(p => (
+        <div key={p.slug} className="article-group" style={{ marginBottom: 12 }}>
+          <div className="article-header" onClick={() => setEditingSlug(editingSlug === p.slug ? null : p.slug)} style={{ cursor: 'pointer' }}>
+            <div>
+              <span className="article-title">{p.name}</span>
+              <span className="article-meta" style={{ marginLeft: 8 }}>({p.slug})</span>
+              <span className="status-badge approved" style={{ marginLeft: 8 }}>優先度 {p.priority}</span>
+            </div>
+            <span style={{ fontSize: 12, color: '#888' }}>{editingSlug === p.slug ? '▲ 閉じる' : '▼ 編集'}</span>
+          </div>
+
+          {editingSlug !== p.slug && (
+            <div style={{ padding: '10px 16px', fontSize: 13 }}>
+              <div style={{ color: '#555', marginBottom: 4 }}><strong>特徴:</strong> {p.features?.join(' / ')}</div>
+              <div style={{ color: '#555', marginBottom: 4 }}><strong>推奨文脈:</strong> {p.bestFor?.join(' / ')}</div>
+              {p.caution && <div style={{ color: '#c62828', fontSize: 12 }}>⚠ {p.caution}</div>}
+            </div>
+          )}
+
+          {editingSlug === p.slug && (
+            <div style={{ padding: 16 }}>
+              <PartnerEditor
+                partner={p}
+                category={activeCategory}
+                onSave={handleSave}
+                onCancel={() => setEditingSlug(null)}
+                onDelete={handleDelete}
+              />
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RunModal({ onClose, onRun }) {
   const [postIds, setPostIds] = useState('');
   const [running, setRunning] = useState(false);
@@ -312,6 +484,7 @@ export default function App() {
         <div className="header-nav">
           <button className={page === 'review' ? 'active' : ''} onClick={() => setPage('review')}>承認</button>
           <button className={page === 'history' ? 'active' : ''} onClick={() => setPage('history')}>履歴</button>
+          <button className={page === 'partners' ? 'active' : ''} onClick={() => setPage('partners')}>商材</button>
           <button onClick={() => setShowRunModal(true)}>Gap Fill 実行</button>
         </div>
       </div>
@@ -387,6 +560,8 @@ export default function App() {
         )}
 
         {page === 'history' && <HistoryView history={history} onRollback={handleRollback} />}
+
+        {page === 'partners' && <PartnerManager showToast={showToast} />}
       </div>
 
       {showRunModal && <RunModal onClose={() => setShowRunModal(false)} onRun={handleRun} />}

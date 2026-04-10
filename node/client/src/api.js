@@ -32,4 +32,12 @@ export const api = {
 
   rollback: (historyId) =>
     request(`/api/rollback/${historyId}`, { method: 'POST' }),
+
+  getAllPartners: () => request('/api/partners'),
+
+  updatePartner: (category, slug, data) =>
+    request(`/api/partners/${category}/${slug}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  deletePartner: (category, slug) =>
+    request(`/api/partners/${category}/${slug}`, { method: 'DELETE' }),
 };
