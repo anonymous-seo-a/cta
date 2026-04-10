@@ -250,11 +250,22 @@ function extractH2Sections($content) {
         $sectionEnd = ($i + 1 < $h2Count) ? $matches[0][$i + 1][1] : strlen($content);
         $sectionContent = substr($content, $headingEnd, $sectionEnd - $headingEnd);
 
-        // CTA検出
-        $hasCta = (
-            preg_match('/<!-- wp:soico-cta\//', $sectionContent) === 1 ||
-            preg_match('/\/recommends\/[a-z0-9_-]+/i', $sectionContent) === 1
-        );
+        // CTA検出 + 個数カウント + 詳細
+        $ctaBlocks = [];
+        if (preg_match_all('/<!-- wp:soico-cta\/([a-z-]+)\s+(\{[^}]*\})\s*\/-->/', $sectionContent, $ctaMatches)) {
+            for ($ci = 0; $ci < count($ctaMatches[0]); $ci++) {
+                $attrs = json_decode($ctaMatches[2][$ci], true) ?: [];
+                $ctaBlocks[] = [
+                    'blockType' => $ctaMatches[1][$ci],
+                    'partner' => isset($attrs['company']) ? $attrs['company'] : (isset($attrs['exchange']) ? $attrs['exchange'] : ''),
+                    'featureText' => isset($attrs['featureText']) ? $attrs['featureText'] : '',
+                    'raw' => $ctaMatches[0][$ci],
+                ];
+            }
+        }
+        $hasTaLink = preg_match('/\/recommends\/[a-z0-9_-]+/i', $sectionContent) === 1;
+        $hasCta = count($ctaBlocks) > 0 || $hasTaLink;
+        $ctaCount = count($ctaBlocks) + ($hasTaLink ? 1 : 0);
 
         // セクション要約（HTMLタグ除去、先頭150文字）
         $excerpt = '';
@@ -270,6 +281,8 @@ function extractH2Sections($content) {
             'index' => $i + 1,
             'heading' => trim($headingText),
             'hasCta' => $hasCta,
+            'ctaCount' => $ctaCount,
+            'ctaBlocks' => $ctaBlocks,
             'excerpt' => $excerpt,
         ];
     }

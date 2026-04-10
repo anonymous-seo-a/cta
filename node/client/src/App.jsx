@@ -334,6 +334,98 @@ function PartnerManager({ showToast }) {
   );
 }
 
+function AuditView({ showToast }) {
+  const [duplicates, setDuplicates] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [scanned, setScanned] = useState(false);
+
+  const handleScan = async () => {
+    setLoading(true);
+    try {
+      const result = await api.auditDuplicates();
+      setDuplicates(result.duplicates || []);
+      setScanned(true);
+      showToast(`${result.total}件の重複CTAを検出`);
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setLoading(false);
+  };
+
+  const handleRemove = async (postId, rawBlock, idx) => {
+    if (!confirm('このCTAブロックを削除しますか？（バックアップは自動保存されます）')) return;
+    try {
+      await api.removeCta(postId, rawBlock);
+      // 該当アイテムのctaBlocksから削除
+      setDuplicates(prev => prev.map(d => {
+        if (d.postId === postId && d.ctaBlocks) {
+          const newBlocks = [...d.ctaBlocks];
+          newBlocks.splice(idx, 1);
+          return { ...d, ctaBlocks: newBlocks, ctaCount: newBlocks.length };
+        }
+        return d;
+      }).filter(d => d.ctaCount > 1));
+      showToast('CTAを削除しました');
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="btn-apply" onClick={handleScan} disabled={loading}>
+          {loading ? 'スキャン中...' : '重複CTAスキャン'}
+        </button>
+        {scanned && <span style={{ fontSize: 14, color: '#888' }}>{duplicates.length}件の重複を検出</span>}
+      </div>
+
+      {loading && <div className="loading"><div className="spinner" /> 全記事をスキャン中...</div>}
+
+      {scanned && duplicates.length === 0 && !loading && (
+        <div className="loading">重複CTAはありません</div>
+      )}
+
+      {duplicates.map((d, di) => (
+        <div key={`${d.postId}-${d.sectionIndex}-${di}`} className="article-group" style={{ marginBottom: 12 }}>
+          <div className="article-header">
+            <div>
+              <div className="article-title">{d.title}</div>
+              <div className="article-meta">
+                ID: {d.postId} | セクション: {d.heading} | CTA数: <span style={{ color: '#c62828', fontWeight: 700 }}>{d.ctaCount}</span>
+              </div>
+            </div>
+            <a href={d.url} target="_blank" rel="noopener" className="article-link">記事を開く →</a>
+          </div>
+
+          {(d.ctaBlocks || []).map((block, bi) => (
+            <div key={bi} className="result-row">
+              <div className="result-row-header">
+                <div>
+                  <span className="result-heading">{block.blockType}</span>
+                  <span className="article-meta" style={{ marginLeft: 8 }}>partner: {block.partner}</span>
+                </div>
+                <span className={`status-badge ${bi === 0 ? 'approved' : 'rejected'}`}>
+                  {bi === 0 ? '残す' : '重複'}
+                </span>
+              </div>
+              {block.featureText && <div className="result-reason">「{block.featureText}」</div>}
+              <div className="result-actions">
+                {bi > 0 && (
+                  <button className="btn-reject btn-small" onClick={() => handleRemove(d.postId, block.raw, bi)}>
+                    このCTAを削除
+                  </button>
+                )}
+                {bi === 0 && <span style={{ fontSize: 12, color: '#2e7d32' }}>最初のCTAは保持されます</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RunModal({ onClose, onRun, onStop }) {
   const [postIds, setPostIds] = useState('');
   const [started, setStarted] = useState(false);
@@ -563,6 +655,7 @@ export default function App() {
         <div className="header-nav">
           <button className={page === 'review' ? 'active' : ''} onClick={() => setPage('review')}>承認</button>
           <button className={page === 'history' ? 'active' : ''} onClick={() => setPage('history')}>履歴</button>
+          <button className={page === 'audit' ? 'active' : ''} onClick={() => setPage('audit')}>監査</button>
           <button className={page === 'partners' ? 'active' : ''} onClick={() => setPage('partners')}>商材</button>
           <button onClick={() => setShowRunModal(true)}>Gap Fill 実行</button>
         </div>
@@ -639,6 +732,8 @@ export default function App() {
         )}
 
         {page === 'history' && <HistoryView history={history} onRollback={handleRollback} />}
+
+        {page === 'audit' && <AuditView showToast={showToast} />}
 
         {page === 'partners' && <PartnerManager showToast={showToast} />}
       </div>

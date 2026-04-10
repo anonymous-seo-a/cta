@@ -37,6 +37,12 @@ export const api = {
   rollback: (historyId) =>
     request(`/api/rollback/${historyId}`, { method: 'POST' }),
 
+  auditDuplicates: (postIds) =>
+    request('/api/audit/duplicates', { method: 'POST', body: JSON.stringify({ postIds }) }),
+
+  removeCta: (postId, rawBlock) =>
+    request('/api/audit/remove-cta', { method: 'POST', body: JSON.stringify({ postId, rawBlock }) }),
+
   getAllPartners: () => request('/api/partners'),
 
   updatePartner: (category, slug, data) =>

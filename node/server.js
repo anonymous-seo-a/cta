@@ -485,6 +485,92 @@ app.get('/api/history', async (req, res) => {
   res.json(history);
 });
 
+// ============================================================
+// CTA監査: 重複CTA検出
+// ============================================================
+app.post('/api/audit/duplicates', async (req, res) => {
+  const { postIds } = req.body;
+  try {
+    const articles = await fetchArticlesFromPHP(postIds);
+    const duplicates = [];
+
+    for (const post of articles) {
+      for (const section of post.sections) {
+        if (section.ctaCount > 1 && section.ctaBlocks) {
+          duplicates.push({
+            postId: post.id,
+            url: post.url,
+            title: post.title,
+            category: post.category,
+            heading: section.heading,
+            sectionIndex: section.index,
+            ctaCount: section.ctaCount,
+            ctaBlocks: section.ctaBlocks,
+          });
+        }
+      }
+    }
+
+    res.json({ total: duplicates.length, duplicates });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// CTA除外: 指定CTAブロックをWordPressから削除
+app.post('/api/audit/remove-cta', async (req, res) => {
+  const { postId, rawBlock } = req.body;
+  if (!postId || !rawBlock) return res.status(400).json({ error: 'postId and rawBlock required' });
+
+  const auth = Buffer.from(`${config.wp.username}:${config.wp.appPassword}`).toString('base64');
+
+  try {
+    const getRes = await fetch(`${config.wp.restBase}/posts/${postId}?context=edit`, {
+      headers: { 'Authorization': `Basic ${auth}` },
+    });
+    if (!getRes.ok) return res.status(500).json({ error: `GET ${getRes.status}` });
+
+    const postData = await getRes.json();
+    const originalContent = postData.content.raw;
+
+    // バックアップ
+    await store.saveBackup(postId, originalContent);
+
+    // 該当CTAブロックを1つだけ削除（最初に見つかった1つ）
+    const idx = originalContent.indexOf(rawBlock);
+    if (idx === -1) return res.status(404).json({ error: 'CTA block not found in content' });
+
+    // ブロック前後の空行も削除
+    let removeStart = idx;
+    let removeEnd = idx + rawBlock.length;
+    while (removeStart > 0 && originalContent[removeStart - 1] === '\n') removeStart--;
+    while (removeEnd < originalContent.length && originalContent[removeEnd] === '\n') removeEnd++;
+
+    const newContent = originalContent.substring(0, removeStart) + originalContent.substring(removeEnd);
+
+    const putRes = await fetch(`${config.wp.restBase}/posts/${postId}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: newContent }),
+    });
+
+    if (putRes.ok) {
+      await store.addHistoryEntry({
+        postId,
+        title: postData.title.raw,
+        url: postData.link,
+        action: 'remove-cta',
+        removedBlock: rawBlock.substring(0, 100),
+      });
+      res.json({ success: true });
+    } else {
+      res.status(500).json({ error: `POST ${putRes.status}` });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Partner DB — CRUD
 app.get('/api/partners', async (req, res) => {
   const db = await loadPartnerDB();
