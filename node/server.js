@@ -523,14 +523,14 @@ app.post('/api/audit/duplicates', async (req, res) => {
   }
 });
 
-// CTA除外: セクション内の連続重複CTAを削除
+// CTA除外: サブセクション（H2/H3）内の重複CTAを削除
 //
 // ロジック:
 //   1. 記事の content.raw を取得
-//   2. 指定された sectionHeading の H2 を見つける
-//   3. そのセクション範囲内で soico-cta ブロックを全検索
-//   4. セクション内の occurrence 番目を削除（デフォルト=2、重複の方）
-//   ※ 他セクションの同一CTAには影響しない
+//   2. H2 + H3 の全見出しを抽出
+//   3. sectionHeading にマッチする見出しを見つける
+//   4. その見出し→次の同レベル以上の見出し の範囲でCTAを検索
+//   5. partner でフィルタし、occurrence 番目を削除
 app.post('/api/audit/remove-cta', async (req, res) => {
   const { postId, partner, featureText, sectionHeading, occurrence } = req.body;
   if (!postId || !sectionHeading) return res.status(400).json({ error: 'postId and sectionHeading required' });
@@ -550,16 +550,30 @@ app.post('/api/audit/remove-cta', async (req, res) => {
     // バックアップ
     await store.saveBackup(postId, originalContent);
 
-    // H2見出しを全抽出してセクション範囲を特定
-    const h2Regex = /<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h2[^>]*>([\s\S]*?)<\/h2>\s*<!-- \/wp:heading -->/gi;
+    // H2 + H3 見出しを全抽出
+    const headingRegex = /<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h([23])[^>]*>([\s\S]*?)<\/h\1>\s*<!-- \/wp:heading -->/gi;
     const headings = [];
     let hm;
-    while ((hm = h2Regex.exec(originalContent)) !== null) {
+    while ((hm = headingRegex.exec(originalContent)) !== null) {
       headings.push({
-        text: hm[1].replace(/<[^>]+>/g, '').trim(),
+        text: hm[2].replace(/<[^>]+>/g, '').trim(),
+        level: parseInt(hm[1]),
         start: hm.index,
         end: hm.index + hm[0].length,
       });
+    }
+
+    // フォールバック: 生HTML
+    if (headings.length === 0) {
+      const fallbackRegex = /<h([23])[^>]*>([\s\S]*?)<\/h\1>/gi;
+      while ((hm = fallbackRegex.exec(originalContent)) !== null) {
+        headings.push({
+          text: hm[2].replace(/<[^>]+>/g, '').trim(),
+          level: parseInt(hm[1]),
+          start: hm.index,
+          end: hm.index + hm[0].length,
+        });
+      }
     }
 
     // 対象セクションを特定
@@ -570,8 +584,15 @@ app.post('/api/audit/remove-cta', async (req, res) => {
       return res.status(404).json({ error: `見出し「${sectionHeading}」が見つかりません` });
     }
 
+    const targetLevel = headings[targetIdx].level;
     const sectionStart = headings[targetIdx].end;
-    const sectionEnd = targetIdx + 1 < headings.length ? headings[targetIdx + 1].start : originalContent.length;
+    let sectionEnd = originalContent.length;
+    for (let i = targetIdx + 1; i < headings.length; i++) {
+      if (headings[i].level <= targetLevel) {
+        sectionEnd = headings[i].start;
+        break;
+      }
+    }
     const sectionContent = originalContent.substring(sectionStart, sectionEnd);
 
     // セクション内の soico-cta ブロックを全検索
