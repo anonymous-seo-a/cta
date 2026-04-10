@@ -14,9 +14,7 @@
   - `prompts/gap_fill_prompt.md` 新規作成
   - PARTNER_SLUG_MAP に不足slug追加、applyApprovedInsertions をシート名パラメータ化
 - [ ] **Phase A2 動作確認**: `testGapFill()` で3記事テスト → `cta_gap_fill_plan` シート確認 → 承認 → 反映
-- [ ] **Phase B**: `cta_diagnosis_master` シート新設（永続台帳。全2000記事 × PV閾値30 × snapshot差分検出）
-  - `clasp/cta_diagnosis_master.js` 新規作成
-  - `clasp/main.js` に `runWeeklyScoring()` 追加、`TOP_N_ARTICLES` 撤廃
+- [x] **Phase B**: `cta_diagnosis_master` 永続台帳（2400記事投入済み、list_posts.php DB直接アクセスで高速化）
 - [ ] **Phase C**: `runDiagnosisBatch()` レジューム式バッチ化。台帳ベースで status=未診断/要再診断 を順次処理
 - [ ] **Phase D**: `cta_insertion_plan` シートにフィルタUI追加（カテゴリ別/スコア順/ステータス別）
 
@@ -75,7 +73,8 @@
 
 ## DONE（完了済み。月1回アーカイブ）
 
-- [x] Phase A2: CTA Gap Fill 機能（Claude intent判定 + ラウンドロビン配分）(2026-04-10)
+- [x] Phase B: cta_diagnosis_master 永続台帳 + list_posts.php DB直接アクセ�� (2026-04-10)
+- [x] Phase A2: CTA Gap Fill 機能（Claude intent判定 + 文脈マイクロコピー生成）(2026-04-10)
 - [x] Phase A + S1-S3: V2対応 + 挿入位置増加施策 (2026-04-10)
 - [x] Phase A: `buildCtaBlockComment` に `version: "2"` 付与（B-lazy方式） (2026-04-10)
 - [x] clasp環境構築完了 + GASファイルを clasp/ に移行 (2026-04-01, 6c65895)
