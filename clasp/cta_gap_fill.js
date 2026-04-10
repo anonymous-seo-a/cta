@@ -185,6 +185,15 @@ ${sectionList}
 
 // ============================================================
 // Gap Fill メイン処理
+//
+// 対象記事の取得優先順位:
+//   1. targetPostIds が指定されている → そのIDリスト
+//   2. 台帳 (cta_diagnosis_master) がある → gapFillStatus が未実行 or 空、
+//      かつ diagnosisStatus がスキップ系でない記事を score 降順で取得
+//   3. 台帳がない → 週次シートから取得（従来互換）
+//
+// GAS 5分制約でレジューム可能。
+// 処理済み記事は台帳の gapFillStatus を '実行済み' に更新。
 // ============================================================
 function runGapFill(targetPostIds) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -196,14 +205,24 @@ function runGapFill(targetPostIds) {
   }
 
   let targets;
+  let masterSheet = null; // 台帳シート（gapFillStatus更新用）
+
   if (targetPostIds && targetPostIds.length > 0) {
-    targets = targetPostIds.map(id => ({ postId: String(id), url: '' }));
+    targets = targetPostIds.map(id => ({ postId: String(id), url: '', masterRow: null }));
   } else {
-    targets = getGapFillTargetsFromWeeklySheet(ss);
+    // 台帳ベースで対象取得
+    const masterResult = getGapFillTargetsFromMaster(ss);
+    if (masterResult) {
+      targets = masterResult.targets;
+      masterSheet = masterResult.sheet;
+    } else {
+      // 台帳がない場合は週次シートからフォールバック
+      targets = getGapFillTargetsFromWeeklySheet(ss).map(t => ({ ...t, masterRow: null }));
+    }
   }
 
   if (!targets || targets.length === 0) {
-    Logger.log('対象記事がありません');
+    Logger.log('対象記事がありません（全て実行済み or 対象外）');
     return;
   }
 
@@ -339,6 +358,11 @@ function runGapFill(targetPostIds) {
       Logger.log(`  ✓ ${section.heading} → ${pluginSlug} (${item.intent}) 「${featureText}」`);
     }
 
+    // 台帳の gapFillStatus を更新
+    if (masterSheet && target.masterRow) {
+      masterSheet.getRange(target.masterRow, COL.GAP_FILL_STATUS + 1).setValue('実行済み');
+    }
+
     processed++;
     Utilities.sleep(1000);
   }
@@ -348,8 +372,17 @@ function runGapFill(targetPostIds) {
     return;
   }
 
-  writeGapFillPlanSheet(ss, plans);
+  appendToGapFillPlanSheet(ss, plans);
   Logger.log(`\n=== Gap Fill 完了: ${processed}記事から${plans.length}件の挿入候補 ===`);
+}
+
+// ============================================================
+// 全記事 Gap Fill（台帳ベース・レジューム式）
+// GASトリガー（5分間隔）に登録して自動実行する用途。
+// 引数なしで runGapFill() を呼ぶ → 台帳から未実行記事を自動取得。
+// ============================================================
+function runGapFillBatch() {
+  runGapFill();
 }
 
 // ============================================================
@@ -360,7 +393,51 @@ function testGapFill() {
 }
 
 // ============================================================
-// 最新の週次レポートシートから対象記事を取得
+// 台帳 (cta_diagnosis_master) から Gap Fill 対象を取得
+// gapFillStatus が空 or 未実行、かつ diagnosisStatus がスキップ系でない記事
+// score 降順でソート
+// ============================================================
+function getGapFillTargetsFromMaster(ss) {
+  const sheet = ss.getSheetByName(MASTER_SHEET_NAME);
+  if (!sheet) return null;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  const data = sheet.getRange(2, 1, lastRow - 1, MASTER_COL_COUNT).getValues();
+  const targets = [];
+
+  const supportedCategories = ['cardloan', 'cryptocurrency', 'securities'];
+
+  for (let i = 0; i < data.length; i++) {
+    const gapStatus = data[i][COL.GAP_FILL_STATUS];
+    const diagStatus = data[i][COL.DIAGNOSIS_STATUS];
+    const category = data[i][COL.CATEGORY];
+
+    // 実行済み or 承認済み → スキップ
+    if (gapStatus === '実行済み' || gapStatus === '承認済み') continue;
+    // PV不足 → スキップ
+    if (diagStatus === 'スキップ(PV不足)') continue;
+    // 非対応カテゴリ → スキップ
+    if (!supportedCategories.includes(category)) continue;
+
+    targets.push({
+      postId: String(data[i][COL.POST_ID]),
+      url: data[i][COL.URL],
+      score: data[i][COL.SCORE] || 0,
+      masterRow: i + 2, // シートの行番号
+    });
+  }
+
+  // score降順
+  targets.sort((a, b) => b.score - a.score);
+
+  Logger.log(`台帳から Gap Fill 対象: ${targets.length}件（score降順）`);
+  return { targets, sheet };
+}
+
+// ============================================================
+// 最新の週次レポートシートから対象記事を取得（フォールバック）
 // ============================================================
 function getGapFillTargetsFromWeeklySheet(ss) {
   const sheets = ss.getSheets().filter(s => s.getName().startsWith(CONFIG.SHEET_NAME_PREFIX));
@@ -388,7 +465,10 @@ function getGapFillTargetsFromWeeklySheet(ss) {
 }
 
 // ============================================================
-// Gap Fill 計画をスプレッドシートに出力
+// Gap Fill 計画をスプレッドシートに追記
+//
+// バッチ実行で複数回呼ばれるため、シートが既に存在する場合は
+// 既存データの下に追記する（前回結果を消さない）。
 //
 // 列構造:
 //   A: 記事URL, B: 投稿ID, C: カテゴリ, D: 挿入位置, E: 提案内容,
@@ -396,12 +476,12 @@ function getGapFillTargetsFromWeeklySheet(ss) {
 //   I: マッチ見出し, J: ステータス, K: 備考,
 //   L: featureText（★Daiki編集可能。承認前に書き換えると反映時に使われる）
 // ============================================================
-function writeGapFillPlanSheet(ss, plans) {
+function appendToGapFillPlanSheet(ss, plans) {
   const sheetName = 'cta_gap_fill_plan';
 
   let sheet = ss.getSheetByName(sheetName);
-  if (sheet) ss.deleteSheet(sheet);
-  sheet = ss.insertSheet(sheetName);
+  const isNew = !sheet;
+  if (!sheet) sheet = ss.insertSheet(sheetName);
 
   const headers = [
     '記事URL',              // A
@@ -418,12 +498,35 @@ function writeGapFillPlanSheet(ss, plans) {
     'featureText（編集可）', // L ★
   ];
 
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  const headerRange = sheet.getRange(1, 1, 1, headers.length);
-  headerRange.setFontWeight('bold');
-  headerRange.setBackground('#2E7D32');
-  headerRange.setFontColor('#FFFFFF');
+  // ヘッダー（新規シートのみ）
+  if (isNew) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setFontWeight('bold');
+    headerRange.setBackground('#2E7D32');
+    headerRange.setFontColor('#FFFFFF');
 
+    sheet.setColumnWidth(1, 400);
+    sheet.setColumnWidth(4, 300);
+    sheet.setColumnWidth(5, 400);
+    sheet.setColumnWidth(8, 500);
+    sheet.setColumnWidth(9, 300);
+    sheet.setColumnWidth(10, 150);
+    sheet.setColumnWidth(12, 350);
+
+    // 条件付き書式
+    const statusRange = sheet.getRange(2, 10, 1000, 1);
+    sheet.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenTextEqualTo('承認待ち').setBackground('#E8F5E9').setRanges([statusRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenTextEqualTo('承認').setBackground('#C8E6C9').setFontColor('#1B5E20').setRanges([statusRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenTextEqualTo('反映済み').setBackground('#BBDEFB').setRanges([statusRange]).build(),
+    ]);
+  }
+
+  // データ行を追記
   const rows = plans.map(p => [
     p.url, p.postId, p.category, p.location, p.proposed,
     p.partnerSlug, p.pluginSlug, p.ctaBlock,
@@ -432,34 +535,14 @@ function writeGapFillPlanSheet(ss, plans) {
   ]);
 
   if (rows.length > 0) {
-    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    const startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, rows.length, headers.length).setValues(rows);
+
+    // L列（featureText）: 薄い黄色背景
+    sheet.getRange(startRow, 12, rows.length, 1).setBackground('#FFF9C4');
   }
 
-  sheet.setColumnWidth(1, 400);
-  sheet.setColumnWidth(4, 300);
-  sheet.setColumnWidth(5, 400);
-  sheet.setColumnWidth(8, 500);
-  sheet.setColumnWidth(9, 300);
-  sheet.setColumnWidth(10, 150);
-  sheet.setColumnWidth(12, 350);
-
-  // L列（featureText）のスタイル: 編集可能であることを視覚的に示す
-  if (rows.length > 0) {
-    const ftRange = sheet.getRange(2, 12, rows.length, 1);
-    ftRange.setBackground('#FFF9C4'); // 薄い黄色: 編集可能
-  }
-
-  const statusRange = sheet.getRange(2, 10, Math.max(rows.length, 1), 1);
-  sheet.setConditionalFormatRules([
-    SpreadsheetApp.newConditionalFormatRule()
-      .whenTextEqualTo('承認待ち').setBackground('#E8F5E9').setRanges([statusRange]).build(),
-    SpreadsheetApp.newConditionalFormatRule()
-      .whenTextEqualTo('承認').setBackground('#C8E6C9').setFontColor('#1B5E20').setRanges([statusRange]).build(),
-    SpreadsheetApp.newConditionalFormatRule()
-      .whenTextEqualTo('反映済み').setBackground('#BBDEFB').setRanges([statusRange]).build(),
-  ]);
-
-  Logger.log(`「${sheetName}」に ${rows.length} 件出力`);
+  Logger.log(`「${sheetName}」に ${rows.length} 件追記（合計: ${sheet.getLastRow() - 1}件）`);
 }
 
 // ============================================================

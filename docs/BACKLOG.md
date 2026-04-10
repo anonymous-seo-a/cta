@@ -13,10 +13,14 @@
   - `clasp/cta_gap_fill.js` 新規作成
   - `prompts/gap_fill_prompt.md` 新規作成
   - PARTNER_SLUG_MAP に不足slug追加、applyApprovedInsertions をシート名パラメータ化
-- [ ] **Phase A2 動作確認**: `testGapFill()` で3記事テスト → `cta_gap_fill_plan` シート確認 → 承認 → 反映
+- [x] **Phase A2 動作確認**: テスト3記事OK
 - [x] **Phase B**: `cta_diagnosis_master` 永続台帳（2400記事投入済み、list_posts.php DB直接アクセスで高速化）
-- [ ] **Phase C**: `runDiagnosisBatch()` レジューム式バッチ化。台帳ベースで status=未診断/要再診断 を順次処理
-- [ ] **Phase D**: `cta_insertion_plan` シートにフィルタUI追加（カテゴリ別/スコア順/ステータス別）
+- [x] **Gap Fill 全記事拡張**: 台帳ベースのレジューム式 Gap Fill（`runGapFillBatch()`）
+  - 台帳の gapFillStatus で実行済み/未実行を追跡
+  - score 降順で処理、PV不足記事は自動スキップ
+  - `cta_gap_fill_plan` シートに追記式で出力（バッチ実行で前回結果を保持）
+- [ ] **Gap Fill 本番運用**: `runGapFillBatch` を5分間隔トリガーで実行 → 全記事処理完了まで自動継続
+- [ ] **週次スコアリング トリガー設定**: `runWeeklyScoring` を週1回（月曜朝）に設定
 
 ---
 
@@ -37,6 +41,8 @@
 ## LATER（必要だが急がない）
 
 ### CTA挿入拡張
+- [ ] **Phase C**: runDiagnosisBatch レジューム式診断バッチ（マイクロコピー品質改善フェーズで復活。Gap Fillで代替済みのため当面不要）
+- [ ] **Phase D**: フィルタUI（カテゴリ別/スコア順/ステータス別）
 - [ ] **Phase E**: 結論ボックス・比較表ブロック対応（CVR診断プロンプト改修＋block builder拡張が必要、独立タスク）
 - [ ] CVR診断プロンプトに「ブロック種別判定（inline/conclusion/comparison）」を追加
 - [ ] soico-securities-cta に `/wp-json/soico-cta/v1/priorities` REST endpoint 追加（Gap Fill の partner 優先順位を動的取得）
