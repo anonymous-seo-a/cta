@@ -40,8 +40,8 @@ export const api = {
   auditDuplicates: (postIds) =>
     request('/api/audit/duplicates', { method: 'POST', body: JSON.stringify({ postIds }) }),
 
-  removeCta: (postId, rawBlock) =>
-    request('/api/audit/remove-cta', { method: 'POST', body: JSON.stringify({ postId, rawBlock }) }),
+  removeCta: (postId, { blockType, partner, featureText, occurrence }) =>
+    request('/api/audit/remove-cta', { method: 'POST', body: JSON.stringify({ postId, blockType, partner, featureText, occurrence }) }),
 
   getAllPartners: () => request('/api/partners'),
 
