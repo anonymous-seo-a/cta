@@ -423,7 +423,9 @@ function AuditView({ showToast }) {
           {group.sections.map((section, si) => (
             <div key={si}>
               <div style={{ padding: '8px 16px', background: '#fff3e0', borderBottom: '1px solid #eee', fontSize: 13, fontWeight: 600 }}>
-                H2: {section.heading}（CTA {section.ctaCount}個、うち重複 {section.dupCount}個）
+                {section.level === 3 ? 'H3' : 'H2'}: {section.heading}
+                {section.h2Heading !== section.heading && <span style={{ color: '#888', fontWeight: 400 }}> （H2: {section.h2Heading}）</span>}
+                （CTA {section.ctaCount}個、うち重複 {section.dupCount}個）
               </div>
 
               {section.ctaBlocks.map((block, bi) => {

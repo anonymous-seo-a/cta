@@ -496,55 +496,28 @@ app.post('/api/audit/duplicates', async (req, res) => {
 
     for (const post of articles) {
       for (const section of post.sections) {
-        if (!section.ctaBlocks || section.ctaBlocks.length < 2) continue;
+        // PHP側でサブセクション（H3単位）の重複検出済み
+        if (!section.subDuplicates || section.subDuplicates.length === 0) continue;
 
-        // 同一 blockType + partner の組み合わせが2回以上あるものだけを重複とする
-        const counts = {};
-        for (const b of section.ctaBlocks) {
-          const key = `${b.blockType}:${b.partner}`;
-          counts[key] = (counts[key] || 0) + 1;
+        for (const sub of section.subDuplicates) {
+          duplicates.push({
+            postId: post.id,
+            url: post.url,
+            title: post.title,
+            category: post.category,
+            h2Heading: section.heading,
+            heading: sub.heading,
+            level: sub.level,
+            ctaCount: sub.ctaCount,
+            dupCount: sub.dupCount,
+            ctaBlocks: sub.ctaBlocks,
+          });
         }
-
-        const dupKeys = Object.entries(counts).filter(([, c]) => c > 1).map(([k]) => k);
-        if (dupKeys.length === 0) continue;
-
-        // 重複しているCTAだけを抽出し、各CTAに isDuplicate フラグを付与
-        const annotatedBlocks = section.ctaBlocks.map(b => {
-          const key = `${b.blockType}:${b.partner}`;
-          return { ...b, isDuplicate: dupKeys.includes(key) };
-        });
-
-        // 重複グループごとに「残す（1つ目）」「除外候補（2つ目以降）」を判定
-        const seen = {};
-        for (const b of annotatedBlocks) {
-          const key = `${b.blockType}:${b.partner}`;
-          if (b.isDuplicate) {
-            if (!seen[key]) {
-              b.action = 'keep';
-              seen[key] = true;
-            } else {
-              b.action = 'remove';
-            }
-          } else {
-            b.action = 'ok';
-          }
-        }
-
-        duplicates.push({
-          postId: post.id,
-          url: post.url,
-          title: post.title,
-          category: post.category,
-          heading: section.heading,
-          sectionIndex: section.index,
-          ctaCount: section.ctaBlocks.length,
-          dupCount: annotatedBlocks.filter(b => b.action === 'remove').length,
-          ctaBlocks: annotatedBlocks,
-        });
       }
     }
 
-    res.json({ total: duplicates.length, totalRemovable: duplicates.reduce((s, d) => s + d.dupCount, 0), duplicates });
+    const totalRemovable = duplicates.reduce((s, d) => s + d.dupCount, 0);
+    res.json({ total: duplicates.length, totalRemovable, duplicates });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

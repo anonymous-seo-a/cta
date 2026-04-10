@@ -226,14 +226,15 @@ echo json_encode([
 
 // ============================================================
 // H2見出し抽出 + セクション分割 + CTA検出 + 要約
+//
+// Gap Fill 用: H2 レベルのセクション分割。
+// CTA検出はH2セクション全体で hasCta を判定（Gap Fill のスキップ判定用）。
 // ============================================================
 function extractH2Sections($content) {
     $sections = [];
 
-    // Gutenbergブロック形式のH2を検出
     $pattern = '/<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h2[^>]*>([\s\S]*?)<\/h2>\s*<!-- \/wp:heading -->/i';
     if (!preg_match_all($pattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
-        // フォールバック: 生HTML
         $pattern = '/<h2[^>]*>([\s\S]*?)<\/h2>/i';
         if (!preg_match_all($pattern, $content, $matches, PREG_OFFSET_CAPTURE)) {
             return $sections;
@@ -245,29 +246,14 @@ function extractH2Sections($content) {
     for ($i = 0; $i < $h2Count; $i++) {
         $headingText = strip_tags($matches[1][$i][0]);
         $headingEnd = $matches[0][$i][1] + strlen($matches[0][$i][0]);
-
-        // セクション範囲: 見出し終了 ～ 次のH2開始（or コンテンツ末尾）
         $sectionEnd = ($i + 1 < $h2Count) ? $matches[0][$i + 1][1] : strlen($content);
         $sectionContent = substr($content, $headingEnd, $sectionEnd - $headingEnd);
 
-        // CTA検出 + 個数カウント + 詳細
-        $ctaBlocks = [];
-        if (preg_match_all('/<!-- wp:soico-cta\/([a-z-]+)\s+(\{[^}]*\})\s*\/-->/', $sectionContent, $ctaMatches)) {
-            for ($ci = 0; $ci < count($ctaMatches[0]); $ci++) {
-                $attrs = json_decode($ctaMatches[2][$ci], true) ?: [];
-                $ctaBlocks[] = [
-                    'blockType' => $ctaMatches[1][$ci],
-                    'partner' => isset($attrs['company']) ? $attrs['company'] : (isset($attrs['exchange']) ? $attrs['exchange'] : ''),
-                    'featureText' => isset($attrs['featureText']) ? $attrs['featureText'] : '',
-                    'raw' => $ctaMatches[0][$ci],
-                ];
-            }
-        }
+        $ctaBlocks = extractCtaBlocksFromContent($sectionContent);
         $hasTaLink = preg_match('/\/recommends\/[a-z0-9_-]+/i', $sectionContent) === 1;
         $hasCta = count($ctaBlocks) > 0 || $hasTaLink;
         $ctaCount = count($ctaBlocks) + ($hasTaLink ? 1 : 0);
 
-        // セクション要約（HTMLタグ除去、先頭150文字）
         $excerpt = '';
         if (!$hasCta) {
             $cleaned = preg_replace('/<!-- [\s\S]*?-->/', '', $sectionContent);
@@ -277,17 +263,142 @@ function extractH2Sections($content) {
             $excerpt = mb_substr($cleaned, 0, 150, 'UTF-8');
         }
 
+        // H2+H3 サブセクション単位の重複検出
+        $subDuplicates = detectSubSectionDuplicates($sectionContent, $headingText);
+
         $sections[] = [
             'index' => $i + 1,
             'heading' => trim($headingText),
             'hasCta' => $hasCta,
             'ctaCount' => $ctaCount,
             'ctaBlocks' => $ctaBlocks,
+            'subDuplicates' => $subDuplicates,
             'excerpt' => $excerpt,
         ];
     }
 
     return $sections;
+}
+
+// ============================================================
+// コンテンツ内の soico-cta ブロックを全抽出
+// ============================================================
+function extractCtaBlocksFromContent($content) {
+    $ctaBlocks = [];
+    if (preg_match_all('/<!-- wp:soico-cta\/([a-z-]+)\s+(\{[^}]*\})\s*\/-->/', $content, $ctaMatches)) {
+        for ($ci = 0; $ci < count($ctaMatches[0]); $ci++) {
+            $attrs = json_decode($ctaMatches[2][$ci], true) ?: [];
+            $ctaBlocks[] = [
+                'blockType' => $ctaMatches[1][$ci],
+                'partner' => isset($attrs['company']) ? $attrs['company'] : (isset($attrs['exchange']) ? $attrs['exchange'] : ''),
+                'featureText' => isset($attrs['featureText']) ? $attrs['featureText'] : '',
+                'raw' => $ctaMatches[0][$ci],
+            ];
+        }
+    }
+    return $ctaBlocks;
+}
+
+// ============================================================
+// サブセクション（H2直下 or 各H3配下）単位で重複CTAを検出
+//
+// H2セクション内を H3 で分割し、各サブセクションで
+// 同一 blockType + partner が2回以上出現するものを重複と判定。
+// H2直下（最初のH3より前の領域）もサブセクションとして扱う。
+// ============================================================
+function detectSubSectionDuplicates($h2SectionContent, $h2Heading) {
+    $duplicates = [];
+
+    // H3 見出しを検出
+    $h3Pattern = '/<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h3[^>]*>([\s\S]*?)<\/h3>\s*<!-- \/wp:heading -->/i';
+    $hasH3 = preg_match_all($h3Pattern, $h2SectionContent, $h3Matches, PREG_OFFSET_CAPTURE);
+
+    if (!$hasH3) {
+        // H3 フォールバック: 生HTML
+        $h3Pattern = '/<h3[^>]*>([\s\S]*?)<\/h3>/i';
+        $hasH3 = preg_match_all($h3Pattern, $h2SectionContent, $h3Matches, PREG_OFFSET_CAPTURE);
+    }
+
+    // サブセクション範囲を構築
+    $subSections = [];
+
+    if ($hasH3 && count($h3Matches[0]) > 0) {
+        // H2直下（最初のH3より前）
+        $firstH3Start = $h3Matches[0][0][1];
+        if ($firstH3Start > 0) {
+            $subSections[] = [
+                'heading' => $h2Heading,
+                'level' => 2,
+                'content' => substr($h2SectionContent, 0, $firstH3Start),
+            ];
+        }
+
+        // 各H3サブセクション
+        $h3Count = count($h3Matches[0]);
+        for ($j = 0; $j < $h3Count; $j++) {
+            $h3Text = strip_tags($h3Matches[1][$j][0]);
+            $h3End = $h3Matches[0][$j][1] + strlen($h3Matches[0][$j][0]);
+            $subEnd = ($j + 1 < $h3Count) ? $h3Matches[0][$j + 1][1] : strlen($h2SectionContent);
+            $subSections[] = [
+                'heading' => trim($h3Text),
+                'level' => 3,
+                'content' => substr($h2SectionContent, $h3End, $subEnd - $h3End),
+            ];
+        }
+    } else {
+        // H3がない場合はH2全体を1サブセクション
+        $subSections[] = [
+            'heading' => $h2Heading,
+            'level' => 2,
+            'content' => $h2SectionContent,
+        ];
+    }
+
+    // 各サブセクションで重複を検出
+    foreach ($subSections as $sub) {
+        $ctaBlocks = extractCtaBlocksFromContent($sub['content']);
+        if (count($ctaBlocks) < 2) continue;
+
+        // 同一 blockType + partner のカウント
+        $counts = [];
+        foreach ($ctaBlocks as $b) {
+            $key = $b['blockType'] . ':' . $b['partner'];
+            if (!isset($counts[$key])) $counts[$key] = 0;
+            $counts[$key]++;
+        }
+
+        $dupKeys = array_keys(array_filter($counts, function($c) { return $c > 1; }));
+        if (empty($dupKeys)) continue;
+
+        // action フラグ付与
+        $seen = [];
+        foreach ($ctaBlocks as &$b) {
+            $key = $b['blockType'] . ':' . $b['partner'];
+            if (in_array($key, $dupKeys)) {
+                if (!isset($seen[$key])) {
+                    $b['action'] = 'keep';
+                    $seen[$key] = true;
+                } else {
+                    $b['action'] = 'remove';
+                }
+            } else {
+                $b['action'] = 'ok';
+            }
+        }
+        unset($b);
+
+        $dupCount = count(array_filter($ctaBlocks, function($b) { return $b['action'] === 'remove'; }));
+
+        $duplicates[] = [
+            'heading' => $sub['heading'],
+            'level' => $sub['level'],
+            'ctaCount' => count($ctaBlocks),
+            'dupCount' => $dupCount,
+            'ctaBlocks' => $ctaBlocks,
+        ];
+    }
+
+    return $duplicates;
 }
 
 // ============================================================
