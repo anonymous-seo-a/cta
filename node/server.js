@@ -550,11 +550,33 @@ app.post('/api/audit/remove-cta', async (req, res) => {
     // バックアップ
     await store.saveBackup(postId, originalContent);
 
-    // H2 + H3 見出しを全抽出
-    const headingRegex = /<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h([23])[^>]*>([\s\S]*?)<\/h\1>\s*<!-- \/wp:heading -->/gi;
+    // H2 + H3 見出しを全抽出（Gutenberg + 生HTML 混在対応）
+    // 両形式を同時に検索し、位置順でソート
     const headings = [];
     let hm;
-    while ((hm = headingRegex.exec(originalContent)) !== null) {
+
+    // Gutenbergブロック形式
+    const gutenbergRegex = /<!-- wp:heading(?:\s+\{[^}]*\})?\s*-->\s*<h([23])[^>]*>([\s\S]*?)<\/h\1>\s*<!-- \/wp:heading -->/gi;
+    const gutenbergPositions = new Set();
+    while ((hm = gutenbergRegex.exec(originalContent)) !== null) {
+      headings.push({
+        text: hm[2].replace(/<[^>]+>/g, '').trim(),
+        level: parseInt(hm[1]),
+        start: hm.index,
+        end: hm.index + hm[0].length,
+      });
+      // このブロック内の <h2>/<h3> 位置を記録（重複検出防止）
+      const innerH = /<h[23]/gi;
+      let ih;
+      while ((ih = innerH.exec(hm[0])) !== null) {
+        gutenbergPositions.add(hm.index + ih.index);
+      }
+    }
+
+    // 生HTML形式（Gutenbergブロックに含まれないもののみ）
+    const rawRegex = /<h([23])[^>]*>([\s\S]*?)<\/h\1>/gi;
+    while ((hm = rawRegex.exec(originalContent)) !== null) {
+      if (gutenbergPositions.has(hm.index)) continue; // Gutenberg内のh2/h3はスキップ
       headings.push({
         text: hm[2].replace(/<[^>]+>/g, '').trim(),
         level: parseInt(hm[1]),
@@ -563,18 +585,8 @@ app.post('/api/audit/remove-cta', async (req, res) => {
       });
     }
 
-    // フォールバック: 生HTML
-    if (headings.length === 0) {
-      const fallbackRegex = /<h([23])[^>]*>([\s\S]*?)<\/h\1>/gi;
-      while ((hm = fallbackRegex.exec(originalContent)) !== null) {
-        headings.push({
-          text: hm[2].replace(/<[^>]+>/g, '').trim(),
-          level: parseInt(hm[1]),
-          start: hm.index,
-          end: hm.index + hm[0].length,
-        });
-      }
-    }
+    // 位置順でソート
+    headings.sort((a, b) => a.start - b.start);
 
     // 対象セクションを特定
     const targetIdx = headings.findIndex(h =>
