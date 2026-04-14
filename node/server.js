@@ -879,6 +879,130 @@ app.get('/api/scoring/status', (req, res) => {
   res.json({ running: scoringCache.running, updatedAt: scoringCache.updatedAt, count: scoringCache.data?.length || 0 });
 });
 
+// ============================================================
+// リンク張替ツール
+// ============================================================
+const { REPLACE_RULES, scanReplacements, applyReplacements } = require('./tools/link-replacer');
+
+// 利用可能な差替ルール一覧
+app.get('/api/link-replacer/rules', (req, res) => {
+  const rules = Object.entries(REPLACE_RULES).map(([key, rule]) => ({
+    key,
+    label: rule.label,
+    patternBlocks: rule.patternBlocks,
+    taLink: rule.taLink,
+    ctaBlock: rule.ctaBlock,
+  }));
+  res.json(rules);
+});
+
+// プレビュー: 記事URLリストから差替箇所をスキャン
+app.post('/api/link-replacer/preview', async (req, res) => {
+  const { urls, partner } = req.body;
+  if (!urls || !partner) return res.status(400).json({ error: 'urls and partner required' });
+  if (!REPLACE_RULES[partner]) return res.status(400).json({ error: `Unknown partner: ${partner}` });
+
+  const auth = Buffer.from(`${config.wp.username}:${config.wp.appPassword}`).toString('base64');
+  const results = [];
+
+  for (const url of urls) {
+    const postId = url.match(/\/(\d+)\/?$/)?.[1];
+    if (!postId) {
+      results.push({ url, postId: null, error: 'URLからpostIDを抽出できません', findings: [] });
+      continue;
+    }
+
+    try {
+      const getRes = await fetch(`${config.wp.restBase}/posts/${postId}?context=edit`, {
+        headers: { 'Authorization': `Basic ${auth}` },
+      });
+      if (!getRes.ok) {
+        results.push({ url, postId, error: `記事取得失敗: HTTP ${getRes.status}`, findings: [] });
+        continue;
+      }
+
+      const postData = await getRes.json();
+      const scan = scanReplacements(postData.content.raw, partner);
+
+      results.push({
+        url,
+        postId,
+        title: postData.title.raw,
+        totalFindings: scan.totalFindings,
+        findings: scan.findings.map(f => ({ type: f.type, description: f.description })),
+      });
+    } catch (e) {
+      results.push({ url, postId, error: e.message, findings: [] });
+    }
+  }
+
+  const totalArticles = results.filter(r => r.totalFindings > 0).length;
+  const totalFindings = results.reduce((s, r) => s + (r.totalFindings || 0), 0);
+
+  res.json({ partner, totalArticles, totalFindings, results });
+});
+
+// 実行: 差替を適用してWordPressに保存
+app.post('/api/link-replacer/apply', async (req, res) => {
+  const { urls, partner } = req.body;
+  if (!urls || !partner) return res.status(400).json({ error: 'urls and partner required' });
+  if (!REPLACE_RULES[partner]) return res.status(400).json({ error: `Unknown partner: ${partner}` });
+
+  const auth = Buffer.from(`${config.wp.username}:${config.wp.appPassword}`).toString('base64');
+  let applied = 0;
+  const errors = [];
+
+  for (const url of urls) {
+    const postId = url.match(/\/(\d+)\/?$/)?.[1];
+    if (!postId) { errors.push({ url, error: 'postID抽出失敗' }); continue; }
+
+    try {
+      const getRes = await fetch(`${config.wp.restBase}/posts/${postId}?context=edit`, {
+        headers: { 'Authorization': `Basic ${auth}` },
+      });
+      if (!getRes.ok) { errors.push({ url, error: `GET ${getRes.status}` }); continue; }
+
+      const postData = await getRes.json();
+      const originalContent = postData.content.raw;
+
+      const scan = scanReplacements(originalContent, partner);
+      if (scan.totalFindings === 0) continue;
+
+      // バックアップ
+      await store.saveBackup(postId, originalContent);
+
+      // 差替適用
+      const newContent = applyReplacements(originalContent, scan.findings);
+
+      const putRes = await fetch(`${config.wp.restBase}/posts/${postId}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: newContent }),
+      });
+
+      if (putRes.ok) {
+        applied++;
+        await store.addHistoryEntry({
+          postId,
+          title: postData.title.raw,
+          url,
+          action: 'link-replace',
+          partner,
+          replacedCount: scan.totalFindings,
+        });
+      } else {
+        errors.push({ url, error: `POST ${putRes.status}` });
+      }
+
+      await new Promise(r => setTimeout(r, 500));
+    } catch (e) {
+      errors.push({ url, error: e.message });
+    }
+  }
+
+  res.json({ applied, errors });
+});
+
 // React SPA フォールバック
 app.get('/{0,}', (req, res) => {
   res.sendFile(path.join(__dirname, 'client/dist/index.html'));

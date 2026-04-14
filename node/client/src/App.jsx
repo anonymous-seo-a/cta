@@ -497,6 +497,142 @@ function ArticlesView({ showToast, onRunGapFill }) {
   );
 }
 
+function LinkReplacerView({ showToast }) {
+  const [rules, setRules] = useState([]);
+  const [partner, setPartner] = useState('');
+  const [urlsText, setUrlsText] = useState('');
+  const [preview, setPreview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    api.getLinkReplacerRules().then(r => {
+      setRules(r);
+      if (r.length > 0) setPartner(r[0].key);
+    });
+  }, []);
+
+  const parseUrls = () => urlsText.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+
+  const handlePreview = async () => {
+    const urls = parseUrls();
+    if (urls.length === 0) return showToast('URLを入力してください', 'error');
+    setLoading(true);
+    setPreview(null);
+    setResult(null);
+    try {
+      const data = await api.previewLinkReplace(urls, partner);
+      setPreview(data);
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setLoading(false);
+  };
+
+  const handleApply = async () => {
+    const urls = parseUrls();
+    if (!confirm(`${urls.length}記事のリンク張替を実行しますか？（バックアップは自動保存されます）`)) return;
+    setApplying(true);
+    try {
+      const data = await api.applyLinkReplace(urls, partner);
+      setResult(data);
+      setPreview(null);
+      showToast(`${data.applied}記事を更新しました${data.errors?.length ? `（${data.errors.length}件エラー）` : ''}`);
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setApplying(false);
+  };
+
+  const selectedRule = rules.find(r => r.key === partner);
+
+  return (
+    <div>
+      <div className="article-group" style={{ marginBottom: 16 }}>
+        <div className="article-header">
+          <div className="article-title">アフィリエイトリンク張替ツール</div>
+        </div>
+        <div style={{ padding: 16 }}>
+          <div className="result-field" style={{ marginBottom: 12 }}>
+            <label>対象</label>
+            <select value={partner} onChange={e => { setPartner(e.target.value); setPreview(null); setResult(null); }}>
+              {rules.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+            </select>
+          </div>
+
+          {selectedRule && (
+            <div style={{ fontSize: 12, color: '#666', marginBottom: 12, padding: 12, background: '#f8f9fa', borderRadius: 8 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>差替内容:</div>
+              {selectedRule.patternBlocks.map((pb, i) => (
+                <div key={i}>・{pb.description}: ref:{pb.before} → ref:{pb.after}</div>
+              ))}
+              <div>・TAリンク: {selectedRule.taLink.before} → {selectedRule.taLink.after}</div>
+              <div>・CTAブロック: {selectedRule.ctaBlock.companySlug} に customThirstyLinkId:{selectedRule.ctaBlock.customThirstyLinkId} を追加</div>
+            </div>
+          )}
+
+          <div className="result-field" style={{ alignItems: 'flex-start', marginBottom: 12 }}>
+            <label>記事URL</label>
+            <textarea rows={8} value={urlsText} onChange={e => setUrlsText(e.target.value)}
+              placeholder="https://www.soico.jp/no1/news/cardloan/12345&#10;https://www.soico.jp/no1/news/cardloan/67890&#10;（改行区切りで複数入力）" />
+          </div>
+
+          <div className="result-actions">
+            <button className="btn-apply" onClick={handlePreview} disabled={loading}>
+              {loading ? 'スキャン中...' : 'プレビュー'}
+            </button>
+            {preview && preview.totalFindings > 0 && (
+              <button className="btn-approve" onClick={handleApply} disabled={applying}>
+                {applying ? '実行中...' : `${preview.totalFindings}箇所を差替実行`}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {preview && (
+        <div>
+          <div style={{ marginBottom: 12, fontSize: 14, fontWeight: 600 }}>
+            プレビュー: {preview.totalArticles}記事 / {preview.totalFindings}箇所
+          </div>
+          {preview.results.map((r, i) => (
+            <div key={i} className="article-group" style={{ marginBottom: 8 }}>
+              <div className="article-header">
+                <div>
+                  <div className="article-title">{r.title || r.url}</div>
+                  <div className="article-meta">ID: {r.postId} | {r.totalFindings || 0}箇所</div>
+                </div>
+                <a href={r.url} target="_blank" rel="noopener" className="article-link">開く →</a>
+              </div>
+              {r.error && <div style={{ padding: '8px 16px', color: '#c62828', fontSize: 13 }}>{r.error}</div>}
+              {(r.findings || []).map((f, fi) => (
+                <div key={fi} style={{ padding: '6px 16px', borderBottom: '1px solid #f0f0f0', fontSize: 12 }}>
+                  <span className={`status-badge ${f.type === 'pattern-block' ? 'approved' : f.type === 'ta-link' ? 'pending' : 'applied'}`} style={{ marginRight: 8 }}>
+                    {f.type === 'pattern-block' ? 'ブロック' : f.type === 'ta-link' ? 'TAリンク' : 'CTA'}
+                  </span>
+                  {f.description}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {result && (
+        <div style={{ marginTop: 16, padding: 16, background: '#e8f5e9', borderRadius: 10 }}>
+          <div style={{ fontWeight: 600 }}>完了: {result.applied}記事を更新</div>
+          {result.errors?.length > 0 && (
+            <div style={{ color: '#c62828', marginTop: 8 }}>
+              エラー: {result.errors.map(e => `${e.url} (${e.error})`).join(', ')}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AuditView({ showToast }) {
   const [duplicates, setDuplicates] = useState([]);
   const [totalRemovable, setTotalRemovable] = useState(0);
@@ -874,6 +1010,7 @@ export default function App() {
           <button className={page === 'history' ? 'active' : ''} onClick={() => setPage('history')}>履歴</button>
           <button className={page === 'audit' ? 'active' : ''} onClick={() => setPage('audit')}>監査</button>
           <button className={page === 'partners' ? 'active' : ''} onClick={() => setPage('partners')}>商材</button>
+          <button className={page === 'tools' ? 'active' : ''} onClick={() => setPage('tools')}>ツール</button>
           <button onClick={() => setShowRunModal(true)}>Gap Fill 実行</button>
         </div>
       </div>
@@ -955,6 +1092,8 @@ export default function App() {
         {page === 'audit' && <AuditView showToast={showToast} />}
 
         {page === 'partners' && <PartnerManager showToast={showToast} />}
+
+        {page === 'tools' && <LinkReplacerView showToast={showToast} />}
       </div>
 
       {showRunModal && <RunModal onClose={() => setShowRunModal(false)} onRun={handleRun} onStop={async () => { try { await api.stopGapFill(); showToast('停止リクエスト送信'); } catch (e) { showToast(e.message, 'error'); } }} />}

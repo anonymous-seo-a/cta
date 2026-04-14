@@ -50,6 +50,13 @@ export const api = {
   refreshScoring: () => request('/api/scoring/refresh', { method: 'POST' }),
   getScoringStatus: () => request('/api/scoring/status'),
 
+  // リンク張替ツール
+  getLinkReplacerRules: () => request('/api/link-replacer/rules'),
+  previewLinkReplace: (urls, partner) =>
+    request('/api/link-replacer/preview', { method: 'POST', body: JSON.stringify({ urls, partner }) }),
+  applyLinkReplace: (urls, partner) =>
+    request('/api/link-replacer/apply', { method: 'POST', body: JSON.stringify({ urls, partner }) }),
+
   getAllPartners: () => request('/api/partners'),
 
   updatePartner: (category, slug, data) =>
