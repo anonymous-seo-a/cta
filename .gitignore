@@ -20,3 +20,8 @@ node_modules/
 # Google service account key (never commit)
 service-account-key.json
 *-key.json
+
+# Operational data (node webapp)
+node/data/gap-fill-results.json
+node/data/apply-history.json
+node/data/backups/
